@@ -43,6 +43,8 @@ enum b2GameShapeType
 	b2_game_shape_box = 0,
 	b2_game_shape_circle = 1,
 	b2_game_shape_polygon = 2,
+	/* Sentinel for bodies created without a shape (RigidBody-only). Stored as uint8_t. */
+	b2_game_shape_none = 255,
 };
 
 enum b2GameMetaFlags
@@ -1088,6 +1090,64 @@ int create_body_circle( uint32_t worldPacked, int type, float x, float y, float 
 								 entityIndex );
 }
 
+/* Body without shapes — integrates velocity/joints, zero contacts until body_add_shape_*. */
+EMSCRIPTEN_KEEPALIVE
+int create_body( uint32_t worldPacked, int type, float x, float y, float angle, float linearDamp, float angularDamp,
+				 float gravityScale, float vx, float vy, float angularVel, int fixedRotation, int entityIndex )
+{
+	if ( g_capacity <= 0 )
+	{
+		return -1;
+	}
+
+	int slot = entityIndex >= 0 ? claim_entity_slot( entityIndex ) : alloc_slot();
+	if ( slot < 0 )
+	{
+		return -1;
+	}
+
+	b2WorldId worldId = unpack_world_id( worldPacked );
+	b2BodyDef bodyDef = b2DefaultBodyDef();
+	bodyDef.type = to_b2_body_type( type );
+	bodyDef.position = (b2Vec2){ x, y };
+	bodyDef.rotation = b2MakeRot( angle );
+	bodyDef.linearVelocity = (b2Vec2){ vx, vy };
+	bodyDef.angularVelocity = angularVel;
+	bodyDef.linearDamping = linearDamp;
+	bodyDef.angularDamping = angularDamp;
+	bodyDef.gravityScale = gravityScale;
+	bodyDef.motionLocks.angularZ = fixedRotation != 0;
+
+	b2BodyId bodyId = b2CreateBody( worldId, &bodyDef );
+	b2Body_SetUserData( bodyId, (void*)(intptr_t)slot );
+
+	/* Dynamic with no shapes has mass 0 in Box2D — force unit mass so impulses/velocity work. */
+	if ( type == b2_game_dynamic )
+	{
+		b2MassData massData = { 1.0f, { 0.0f, 0.0f }, 1.0f };
+		b2Body_SetMassData( bodyId, massData );
+	}
+
+	g_slots[slot].id = bodyId;
+	g_slots[slot].active = 1;
+	g_slots[slot].shapeType = (uint8_t)b2_game_shape_none;
+	g_slots[slot].bodyType = (uint8_t)type;
+
+	if ( slot >= g_slot_high_water )
+	{
+		g_slot_high_water = slot + 1;
+	}
+
+	int flags = 0;
+	if ( type == b2_game_static )
+	{
+		flags |= b2_game_meta_static;
+	}
+	write_meta( slot, b2_game_shape_none, 0.0f, 0.0f, flags );
+	export_slot_state( slot );
+	return slot;
+}
+
 EMSCRIPTEN_KEEPALIVE
 int create_body_polygon( uint32_t worldPacked, int type, float x, float y, float angle, float* vertsXY, int vertCount,
 						 float offsetX, float offsetY, float density, float friction, float restitution, float linearDamp,
@@ -1486,17 +1546,29 @@ void body_set_density( int slot, float density )
 }
 
 EMSCRIPTEN_KEEPALIVE
-void body_set_shape_box( int slot, float hx, float hy, float offsetX, float offsetY )
+void body_add_shape_box( int slot, float hx, float hy, float offsetX, float offsetY )
 {
 	b2BodyId bodyId = slot_body( slot );
-	b2ShapeId shapeId = first_shape( bodyId );
-	if ( !B2_IS_NON_NULL( shapeId ) || !( hx > 0.0f ) || !( hy > 0.0f ) )
+	if ( !B2_IS_NON_NULL( bodyId ) || !( hx > 0.0f ) || !( hy > 0.0f ) )
 	{
 		return;
 	}
 
 	b2Polygon box = b2MakeOffsetBox( hx, hy, (b2Vec2){ offsetX, offsetY }, b2Rot_identity );
-	b2Shape_SetPolygon( shapeId, &box );
+	b2ShapeId shapeId = first_shape( bodyId );
+	if ( B2_IS_NON_NULL( shapeId ) )
+	{
+		b2Shape_SetPolygon( shapeId, &box );
+	}
+	else
+	{
+		b2ShapeDef shapeDef = b2DefaultShapeDef();
+		shapeDef.density = 1.0f;
+		shapeDef.enableSensorEvents = true;
+		shapeDef.enableContactEvents = ( g_slots[slot].bodyType != b2_game_static );
+		b2CreatePolygonShape( bodyId, &shapeDef, &box );
+	}
+
 	b2Body_ApplyMassFromShapes( bodyId );
 	g_slots[slot].shapeType = (uint8_t)b2_game_shape_box;
 	int flags = g_slots[slot].bodyType == b2_game_static ? b2_game_meta_static : 0;
@@ -1504,17 +1576,35 @@ void body_set_shape_box( int slot, float hx, float hy, float offsetX, float offs
 }
 
 EMSCRIPTEN_KEEPALIVE
-void body_set_shape_circle( int slot, float radius, float offsetX, float offsetY )
+void body_set_shape_box( int slot, float hx, float hy, float offsetX, float offsetY )
+{
+	body_add_shape_box( slot, hx, hy, offsetX, offsetY );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void body_add_shape_circle( int slot, float radius, float offsetX, float offsetY )
 {
 	b2BodyId bodyId = slot_body( slot );
-	b2ShapeId shapeId = first_shape( bodyId );
-	if ( !B2_IS_NON_NULL( shapeId ) || !( radius > 0.0f ) )
+	if ( !B2_IS_NON_NULL( bodyId ) || !( radius > 0.0f ) )
 	{
 		return;
 	}
 
 	b2Circle circle = { { offsetX, offsetY }, radius };
-	b2Shape_SetCircle( shapeId, &circle );
+	b2ShapeId shapeId = first_shape( bodyId );
+	if ( B2_IS_NON_NULL( shapeId ) )
+	{
+		b2Shape_SetCircle( shapeId, &circle );
+	}
+	else
+	{
+		b2ShapeDef shapeDef = b2DefaultShapeDef();
+		shapeDef.density = 1.0f;
+		shapeDef.enableSensorEvents = true;
+		shapeDef.enableContactEvents = ( g_slots[slot].bodyType != b2_game_static );
+		b2CreateCircleShape( bodyId, &shapeDef, &circle );
+	}
+
 	b2Body_ApplyMassFromShapes( bodyId );
 	g_slots[slot].shapeType = (uint8_t)b2_game_shape_circle;
 	int flags = g_slots[slot].bodyType == b2_game_static ? b2_game_meta_static : 0;
@@ -1522,11 +1612,16 @@ void body_set_shape_circle( int slot, float radius, float offsetX, float offsetY
 }
 
 EMSCRIPTEN_KEEPALIVE
-void body_set_shape_polygon( int slot, float* vertsXY, int vertCount, float offsetX, float offsetY )
+void body_set_shape_circle( int slot, float radius, float offsetX, float offsetY )
+{
+	body_add_shape_circle( slot, radius, offsetX, offsetY );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void body_add_shape_polygon( int slot, float* vertsXY, int vertCount, float offsetX, float offsetY )
 {
 	b2BodyId bodyId = slot_body( slot );
-	b2ShapeId shapeId = first_shape( bodyId );
-	if ( !B2_IS_NON_NULL( shapeId ) || vertsXY == NULL || vertCount < 3 ||
+	if ( !B2_IS_NON_NULL( bodyId ) || vertsXY == NULL || vertCount < 3 ||
 		 vertCount > B2_MAX_POLYGON_VERTICES )
 	{
 		return;
@@ -1545,11 +1640,61 @@ void body_set_shape_polygon( int slot, float* vertsXY, int vertCount, float offs
 	}
 
 	b2Polygon polygon = b2MakePolygon( &hull, 0.0f );
-	b2Shape_SetPolygon( shapeId, &polygon );
+	b2ShapeId shapeId = first_shape( bodyId );
+	if ( B2_IS_NON_NULL( shapeId ) )
+	{
+		b2Shape_SetPolygon( shapeId, &polygon );
+	}
+	else
+	{
+		b2ShapeDef shapeDef = b2DefaultShapeDef();
+		shapeDef.density = 1.0f;
+		shapeDef.enableSensorEvents = true;
+		shapeDef.enableContactEvents = ( g_slots[slot].bodyType != b2_game_static );
+		b2CreatePolygonShape( bodyId, &shapeDef, &polygon );
+	}
+
 	b2Body_ApplyMassFromShapes( bodyId );
 	g_slots[slot].shapeType = (uint8_t)b2_game_shape_polygon;
 	int flags = g_slots[slot].bodyType == b2_game_static ? b2_game_meta_static : 0;
 	write_meta( slot, b2_game_shape_polygon, 0.0f, 0.0f, flags );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void body_set_shape_polygon( int slot, float* vertsXY, int vertCount, float offsetX, float offsetY )
+{
+	body_add_shape_polygon( slot, vertsXY, vertCount, offsetX, offsetY );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void body_clear_shapes( int slot )
+{
+	b2BodyId bodyId = slot_body( slot );
+	if ( !B2_IS_NON_NULL( bodyId ) )
+	{
+		return;
+	}
+
+	b2ShapeId shapes[8];
+	int count = b2Body_GetShapes( bodyId, shapes, 8 );
+	for ( int i = 0; i < count; ++i )
+	{
+		b2DestroyShape( shapes[i], false );
+	}
+
+	if ( g_slots[slot].bodyType == b2_game_dynamic )
+	{
+		b2MassData massData = { 1.0f, { 0.0f, 0.0f }, 1.0f };
+		b2Body_SetMassData( bodyId, massData );
+	}
+	else
+	{
+		b2Body_ApplyMassFromShapes( bodyId );
+	}
+
+	g_slots[slot].shapeType = (uint8_t)b2_game_shape_none;
+	int flags = g_slots[slot].bodyType == b2_game_static ? b2_game_meta_static : 0;
+	write_meta( slot, b2_game_shape_none, 0.0f, 0.0f, flags );
 }
 
 EMSCRIPTEN_KEEPALIVE
