@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Box2D 3.2 + LiquidFun WASM & SAB Playground</title>
+	<style>
+		:root {
+			--bg: #090d16;
+			--panel-bg: rgba(15, 23, 42, 0.75);
+			--panel-border: rgba(255, 255, 255, 0.1);
+			--accent: #38bdf8;
+			--accent-glow: rgba(56, 189, 248, 0.35);
+			--text: #f8fafc;
+			--text-muted: #94a3b8;
+			--danger: #ef4444;
+			--water: #38bdf8;
+			--viscous: #a855f7;
+			--powder: #eab308;
+			--elastic: #22c55e;
+			--spring: #f43f5e;
+		}
+
+		* {
+			box-sizing: border-box;
+			margin: 0;
+			padding: 0;
+		}
+
+		body {
+			background-color: var(--bg);
+			color: var(--text);
+			font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+			min-height: 100vh;
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			padding: 1rem;
+			user-select: none;
+		}
+
+		header {
+			width: 100%;
+			max-width: 1280px;
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			margin-bottom: 0.75rem;
+		}
+
+		.title-group h1 {
+			font-size: 1.35rem;
+			font-weight: 700;
+			letter-spacing: -0.02em;
+			background: linear-gradient(135deg, #38bdf8 0%, #818cf8 50%, #c084fc 100%);
+			-webkit-background-clip: text;
+			-webkit-text-fill-color: transparent;
+		}
+
+		.title-group p {
+			font-size: 0.8rem;
+			color: var(--text-muted);
+		}
+
+		.stats-bar {
+			display: flex;
+			gap: 1rem;
+			background: var(--panel-bg);
+			border: 1px solid var(--panel-border);
+			padding: 0.4rem 0.8rem;
+			border-radius: 9999px;
+			font-size: 0.8rem;
+			backdrop-filter: blur(12px);
+		}
+
+		.stat-item {
+			display: flex;
+			align-items: center;
+			gap: 0.35rem;
+		}
+
+		.stat-item strong {
+			color: var(--accent);
+			font-variant-numeric: tabular-nums;
+		}
+
+		.app-layout {
+			display: grid;
+			grid-template-columns: 1fr 280px;
+			gap: 1rem;
+			width: 100%;
+			max-width: 1280px;
+		}
+
+		.canvas-container {
+			position: relative;
+			width: 100%;
+			aspect-ratio: 16 / 9;
+			background: #0f172a;
+			border-radius: 12px;
+			overflow: hidden;
+			border: 1px solid var(--panel-border);
+			box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+		}
+
+		canvas, .overlay {
+			position: absolute;
+			top: 0;
+			left: 0;
+			width: 100%;
+			height: 100%;
+		}
+
+		.overlay {
+			cursor: crosshair;
+			touch-action: none;
+		}
+
+		.overlay.disabled {
+			pointer-events: none;
+			cursor: not-allowed;
+		}
+
+		.sidebar {
+			display: flex;
+			flex-direction: column;
+			gap: 0.75rem;
+			background: var(--panel-bg);
+			border: 1px solid var(--panel-border);
+			padding: 1rem;
+			border-radius: 12px;
+			backdrop-filter: blur(16px);
+			max-height: calc(100vh - 120px);
+			overflow-y: auto;
+		}
+
+		.section-title {
+			font-size: 0.75rem;
+			font-weight: 700;
+			text-transform: uppercase;
+			letter-spacing: 0.05em;
+			color: var(--text-muted);
+			margin-top: 0.35rem;
+			margin-bottom: 0.25rem;
+		}
+
+		.btn-grid {
+			display: grid;
+			grid-template-columns: 1fr 1fr;
+			gap: 0.4rem;
+		}
+
+		.btn-grid-1 {
+			display: grid;
+			grid-template-columns: 1fr;
+			gap: 0.4rem;
+		}
+
+		button {
+			display: flex;
+			align-items: center;
+			justify-content: flex-start;
+			gap: 0.5rem;
+			padding: 0.45rem 0.65rem;
+			border-radius: 8px;
+			border: 1px solid var(--panel-border);
+			background: rgba(30, 41, 59, 0.6);
+			color: var(--text);
+			font-size: 0.8rem;
+			font-weight: 500;
+			cursor: pointer;
+			transition: all 0.15s ease;
+		}
+
+		button:hover:not(:disabled) {
+			background: rgba(51, 65, 85, 0.8);
+			border-color: rgba(255, 255, 255, 0.2);
+			transform: translateY(-1px);
+		}
+
+		button.active {
+			background: var(--accent);
+			color: #090d16;
+			border-color: var(--accent);
+			font-weight: 700;
+			box-shadow: 0 0 12px var(--accent-glow);
+		}
+
+		button:disabled {
+			opacity: 0.4;
+			cursor: not-allowed;
+		}
+
+		.btn-water.active { background: var(--water); border-color: var(--water); color: #090d16; }
+		.btn-viscous.active { background: var(--viscous); border-color: var(--viscous); color: #fff; }
+		.btn-powder.active { background: var(--powder); border-color: var(--powder); color: #090d16; }
+		.btn-elastic.active { background: var(--elastic); border-color: var(--elastic); color: #090d16; }
+		.btn-spring.active { background: var(--spring); border-color: var(--spring); color: #fff; }
+
+		.badge {
+			width: 8px;
+			height: 8px;
+			border-radius: 50%;
+			display: inline-block;
+			flex-shrink: 0;
+		}
+		.badge-water { background: var(--water); }
+		.badge-viscous { background: var(--viscous); }
+		.badge-powder { background: var(--powder); }
+		.badge-elastic { background: var(--elastic); }
+		.badge-spring { background: var(--spring); }
+		.badge-body { background: #cbd5e1; }
+
+		button.danger {
+			background: rgba(239, 68, 68, 0.15);
+			border-color: rgba(239, 68, 68, 0.3);
+			color: #fca5a5;
+		}
+
+		button.danger:hover:not(:disabled) {
+			background: rgba(239, 68, 68, 0.3);
+			border-color: var(--danger);
+			color: #fff;
+		}
+
+		#status-msg {
+			font-size: 0.75rem;
+			color: var(--text-muted);
+			padding: 0.4rem;
+			background: rgba(0, 0, 0, 0.25);
+			border-radius: 6px;
+			word-break: break-all;
+		}
+
+		.hint {
+			font-size: 0.7rem;
+			color: var(--text-muted);
+			line-height: 1.3;
+		}
+	</style>
+</head>
+<body>
+	<header>
+		<div class="title-group">
+			<h1>Box2D 3.2 + LiquidFun WASM + SAB</h1>
+			<p>Ported to C17 • Zero-Copy SharedArrayBuffer • Multi-Threaded Workers</p>
+		</div>
+		<div class="stats-bar">
+			<div class="stat-item">Particles: <strong id="stat-particles">0</strong></div>
+			<div class="stat-item">Physics: <strong id="fps-physics">--</strong> FPS</div>
+			<div class="stat-item">Render: <strong id="fps-render">--</strong> FPS</div>
+			<div class="stat-item">Main: <strong id="fps-main">--</strong> FPS</div>
+		</div>
+	</header>
+
+	<div class="app-layout">
+		<div class="canvas-container">
+			<canvas id="canvas" width="960" height="540"></canvas>
+			<div id="overlay" class="overlay disabled"></div>
+		</div>
+
+		<aside class="sidebar">
+			<div class="section-title">LiquidFun Particles</div>
+			<div class="btn-grid">
+				<button type="button" id="tool-water-stream" class="active btn-water">
+					<span class="badge badge-water"></span> Water Stream
+				</button>
+				<button type="button" id="tool-water-block" class="btn-water">
+					<span class="badge badge-water"></span> Water Block
+				</button>
+				<button type="button" id="tool-viscous" class="btn-viscous">
+					<span class="badge badge-viscous"></span> Viscous Slime
+				</button>
+				<button type="button" id="tool-powder" class="btn-powder">
+					<span class="badge badge-powder"></span> Sand / Powder
+				</button>
+				<button type="button" id="tool-elastic" class="btn-elastic">
+					<span class="badge badge-elastic"></span> Elastic Jelly
+				</button>
+				<button type="button" id="tool-spring" class="btn-spring">
+					<span class="badge badge-spring"></span> Spring Blob
+				</button>
+			</div>
+
+			<div class="section-title">Box2D Rigid Bodies</div>
+			<div class="btn-grid">
+				<button type="button" id="tool-box">
+					<span class="badge badge-body"></span> Dynamic Box
+				</button>
+				<button type="button" id="tool-circle">
+					<span class="badge badge-body"></span> Dynamic Circle
+				</button>
+				<button type="button" id="tool-ray" style="grid-column: span 2;">
+					🎯 Ray Cast (Drag)
+				</button>
+			</div>
+
+			<div class="section-title">Presets</div>
+			<div class="btn-grid">
+				<button type="button" id="preset-sandbox">🌊 Sandbox</button>
+				<button type="button" id="preset-dambreak">🧱 Dam Break</button>
+				<button type="button" id="preset-jelly">🍮 Jelly Drop</button>
+				<button type="button" id="preset-sand">⏳ Sand Funnel</button>
+				<button type="button" id="preset-wave" style="grid-column: span 2;">🏊 Wave Pool</button>
+			</div>
+
+			<div class="section-title">Actions</div>
+			<div class="btn-grid-1">
+				<button type="button" id="btn-clear-particles" class="danger">💧 Clear Particles</button>
+				<button type="button" id="btn-clear-all" class="danger">🧹 Clear Scene</button>
+			</div>
+
+			<div id="status-msg">Loading WebAssembly runtime...</div>
+			<p class="hint">💡 <strong>Tip:</strong> Select <em>Water Stream</em> and drag/hold inside the viewport to pour fluid continuously.</p>
+		</aside>
+	</div>
+
+	<script src="game-constants.js"></script>
+	<script src="world-bounds.js"></script>
+	<script>
+		const CANVAS_W = 960;
+		const CANVAS_H = 540;
+
+		const statusEl = document.getElementById('status-msg');
+		const statParticlesEl = document.getElementById('stat-particles');
+		const fpsMainEl = document.getElementById('fps-main');
+		const fpsPhysicsEl = document.getElementById('fps-physics');
+		const fpsRenderEl = document.getElementById('fps-render');
+		const canvas = document.getElementById('canvas');
+		const overlay = document.getElementById('overlay');
+
+		let currentTool = 'water-stream';
+		let renderWorker = null;
+		let physicsWorker = null;
+		let physicsReady = false;
+		let isPointerDown = false;
+		let pointerWorldPos = { x: 0, y: 0 };
+		let emitInterval = null;
+		let rayDrag = null;
+
+		const tools = {
+			'water-stream': document.getElementById('tool-water-stream'),
+			'water-block': document.getElementById('tool-water-block'),
+			'viscous': document.getElementById('tool-viscous'),
+			'powder': document.getElementById('tool-powder'),
+			'elastic': document.getElementById('tool-elastic'),
+			'spring': document.getElementById('tool-spring'),
+			'box': document.getElementById('tool-box'),
+			'circle': document.getElementById('tool-circle'),
+			'ray': document.getElementById('tool-ray'),
+		};
+
+		function setTool(toolName) {
+			currentTool = toolName;
+			for (const key in tools) {
+				tools[key].classList.toggle('active', key === toolName);
+			}
+		}
+
+		for (const key in tools) {
+			tools[key].addEventListener('click', () => setTool(key));
+		}
+
+		const presets = {
+			'preset-sandbox': 'sandbox',
+			'preset-dambreak': 'dambreak',
+			'preset-jelly': 'jelly_drop',
+			'preset-sand': 'sand_funnel',
+			'preset-wave': 'wave_tank',
+		};
+
+		for (const btnId in presets) {
+			document.getElementById(btnId).addEventListener('click', () => {
+				if (!physicsReady || !physicsWorker) return;
+				physicsWorker.postMessage({ type: 'LOAD_PRESET', preset: presets[btnId] });
+				statusEl.textContent = `Loaded preset: ${presets[btnId]}`;
+			});
+		}
+
+		document.getElementById('btn-clear-particles').addEventListener('click', () => {
+			if (!physicsReady || !physicsWorker) return;
+			physicsWorker.postMessage({ type: 'CLEAR_PARTICLES' });
+			statusEl.textContent = 'Particles cleared';
+		});
+
+		document.getElementById('btn-clear-all').addEventListener('click', () => {
+			if (!physicsReady || !physicsWorker) return;
+			if (renderWorker) {
+				renderWorker.postMessage({ type: 'RAY_OVERLAY', visible: false });
+				renderWorker.postMessage({ type: 'SET_SLOT_HIGH_WATER', count: 3 });
+			}
+			physicsWorker.postMessage({ type: 'CLEAR_SCENE' });
+			statusEl.textContent = 'Scene cleared';
+		});
+
+		function overlayScreenCoords(event) {
+			const rect = overlay.getBoundingClientRect();
+			const sx = ((event.clientX - rect.left) / rect.width) * CANVAS_W;
+			const sy = ((event.clientY - rect.top) / rect.height) * CANVAS_H;
+			return { sx, sy };
+		}
+
+		function screenToWorldPoint(sx, sy) {
+			return screenToWorld(sx, sy, CANVAS_W, CANVAS_H);
+		}
+
+		function triggerSpawn(x, y) {
+			if (!physicsReady || !physicsWorker) return;
+
+			switch (currentTool) {
+				case 'water-stream':
+					physicsWorker.postMessage({
+						type: 'EMIT_STREAM',
+						x,
+						y,
+						flags: PARTICLE_FLAG.WATER,
+						count: 6,
+					});
+					break;
+				case 'water-block':
+					physicsWorker.postMessage({
+						type: 'SPAWN_PARTICLES',
+						x,
+						y,
+						radius: 0.9,
+						flags: PARTICLE_FLAG.WATER,
+					});
+					break;
+				case 'viscous':
+					physicsWorker.postMessage({
+						type: 'SPAWN_PARTICLES',
+						x,
+						y,
+						radius: 0.8,
+						flags: PARTICLE_FLAG.VISCOUS,
+					});
+					break;
+				case 'powder':
+					physicsWorker.postMessage({
+						type: 'SPAWN_PARTICLES',
+						x,
+						y,
+						radius: 0.8,
+						flags: PARTICLE_FLAG.POWDER,
+					});
+					break;
+				case 'elastic':
+					physicsWorker.postMessage({
+						type: 'SPAWN_PARTICLE_GROUP',
+						x,
+						y,
+						radius: 0.9,
+						flags: PARTICLE_FLAG.ELASTIC | PARTICLE_FLAG.SPRING,
+						strength: 0.6,
+					});
+					break;
+				case 'spring':
+					physicsWorker.postMessage({
+						type: 'SPAWN_PARTICLE_GROUP',
+						x,
+						y,
+						radius: 0.9,
+						flags: PARTICLE_FLAG.SPRING,
+						strength: 0.5,
+					});
+					break;
+				case 'box':
+					physicsWorker.postMessage({ type: 'CREATE_BOX', x, y });
+					break;
+				case 'circle':
+					physicsWorker.postMessage({ type: 'CREATE_CIRCLE', x, y });
+					break;
+			}
+		}
+
+		overlay.addEventListener('pointerdown', (event) => {
+			if (!physicsReady || !physicsWorker) return;
+			isPointerDown = true;
+			overlay.setPointerCapture(event.pointerId);
+
+			const { sx, sy } = overlayScreenCoords(event);
+			const { x, y } = screenToWorldPoint(sx, sy);
+			pointerWorldPos = { x, y };
+
+			if (currentTool === 'ray') {
+				rayDrag = { ox: x, oy: y };
+				return;
+			}
+
+			triggerSpawn(x, y);
+
+			if (currentTool === 'water-stream') {
+				if (emitInterval) clearInterval(emitInterval);
+				emitInterval = setInterval(() => {
+					if (isPointerDown) {
+						triggerSpawn(pointerWorldPos.x, pointerWorldPos.y);
+					}
+				}, 40);
+			}
+		});
+
+		overlay.addEventListener('pointermove', (event) => {
+			if (!isPointerDown) return;
+			const { sx, sy } = overlayScreenCoords(event);
+			pointerWorldPos = screenToWorldPoint(sx, sy);
+		});
+
+		overlay.addEventListener('pointerup', (event) => {
+			isPointerDown = false;
+			if (emitInterval) {
+				clearInterval(emitInterval);
+				emitInterval = null;
+			}
+
+			if (currentTool === 'ray' && rayDrag) {
+				const { sx, sy } = overlayScreenCoords(event);
+				const end = screenToWorldPoint(sx, sy);
+				const dx = end.x - rayDrag.ox;
+				const dy = end.y - rayDrag.oy;
+				if (Math.hypot(dx, dy) >= 0.05) {
+					physicsWorker.postMessage({
+						type: 'CAST_RAY',
+						ox: rayDrag.ox,
+						oy: rayDrag.oy,
+						dx,
+						dy,
+					});
+				}
+				rayDrag = null;
+			}
+
+			overlay.releasePointerCapture(event.pointerId);
+		});
+
+		function trackMainFps() {
+			let frames = 0;
+			let last = performance.now();
+			function loop(now) {
+				frames++;
+				const elapsed = now - last;
+				if (elapsed >= 500) {
+					fpsMainEl.textContent = Math.round((frames * 1000) / elapsed);
+					frames = 0;
+					last = now;
+				}
+				requestAnimationFrame(loop);
+			}
+			requestAnimationFrame(loop);
+		}
+
+		if (!crossOriginIsolated) {
+			statusEl.innerHTML = '<strong style="color:#ef4444">SharedArrayBuffer disabled. Serve via node demo/node_server.js (COOP/COEP headers).</strong>';
+		} else {
+			const offscreen = canvas.transferControlToOffscreen();
+			trackMainFps();
+
+			console.log('[main] spawning Worker(box2d_wasm.js)');
+			physicsWorker = new Worker('box2d_wasm.js');
+
+			physicsWorker.onmessage = (event) => {
+				const data = event.data;
+				if (data.type === 'FPS') {
+					fpsPhysicsEl.textContent = data.fps;
+					if (data.particleCount != null) {
+						statParticlesEl.textContent = data.particleCount;
+					}
+					return;
+				}
+
+				if (data.type === 'READY') {
+					renderWorker = new Worker('render.worker.js');
+					renderWorker.onmessage = (fpsEvt) => {
+						if (fpsEvt.data.type === 'FPS') {
+							fpsRenderEl.textContent = fpsEvt.data.fps;
+						}
+					};
+
+					renderWorker.postMessage({
+						type: 'INIT',
+						canvas: offscreen,
+						...data,
+					}, [offscreen]);
+
+					physicsReady = true;
+					overlay.classList.remove('disabled');
+					statusEl.textContent = `Simulation ready (${data.bodyCount} slots, ${data.particleCount ?? 0} particles).`;
+					return;
+				}
+
+				if (data.type === 'SCENE_UPDATED' || data.type === 'SCENE_CLEARED') {
+					if (renderWorker) {
+						renderWorker.postMessage({
+							type: 'SCENE_UPDATED',
+							...data,
+						});
+					}
+					if (data.particleCount != null) {
+						statParticlesEl.textContent = data.particleCount;
+					}
+					return;
+				}
+
+				if (data.type === 'BODY_CREATED') {
+					if (renderWorker) {
+						renderWorker.postMessage({
+							type: 'SLOT_HIGH_WATER',
+							slot: data.slot,
+						});
+					}
+					return;
+				}
+
+				if (data.type === 'RAY_RESULT') {
+					if (renderWorker) {
+						renderWorker.postMessage({
+							type: 'RAY_OVERLAY',
+							visible: true,
+							ox: data.ox,
+							oy: data.oy,
+							ex: data.ox + data.dx,
+							ey: data.oy + data.dy,
+							hit: data.hit,
+							px: data.px,
+							py: data.py,
+							nx: data.nx,
+							ny: data.ny,
+						});
+					}
+					statusEl.textContent = data.hit ? `Ray hit slot ${data.slot} at (${data.px.toFixed(2)}, ${data.py.toFixed(2)})` : 'Ray: no hit';
+					return;
+				}
+
+				if (data.type === 'ERROR') {
+					statusEl.textContent = `Physics Error: ${data.message}`;
+				}
+			};
+
+			physicsWorker.onerror = (error) => {
+				statusEl.textContent = `Worker Error: ${error.message}`;
+			};
+		}
+	</script>
+</body>
+</html>
