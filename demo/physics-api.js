@@ -615,8 +615,8 @@ function createPhysicsApi(Module) {
     }
 
     /**
-     * Wire break thresholds + weed joint index (read back from joint events after step).
-     * @param {number} userDataInt - weed Joint pool index
+     * Wire break thresholds + user joint index (read back from joint events after step).
+     * @param {number} userDataInt - User joint pool index
      * @param {number} [forceThreshold=Infinity]
      * @param {number} [torqueThreshold=Infinity]
      */

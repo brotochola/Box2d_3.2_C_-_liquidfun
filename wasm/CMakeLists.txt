@@ -31,7 +31,7 @@ target_include_directories(box2d_wasm PRIVATE
 target_link_libraries(box2d_wasm PRIVATE box2d)
 
 if(BOX2D_WEED_INTEGRATION)
-	set(BOX2D_POST_JS "${CMAKE_CURRENT_SOURCE_DIR}/../demo/weed_post.js")
+	set(BOX2D_POST_JS "${CMAKE_CURRENT_SOURCE_DIR}/../weedjs/weed_post.js")
 else()
 	set(BOX2D_POST_JS "${CMAKE_CURRENT_SOURCE_DIR}/../demo/physics_post.js")
 endif()
@@ -71,7 +71,6 @@ target_compile_options(box2d PRIVATE -pthread -msimd128 -msse2 -ffast-math -fno-
 target_compile_options(box2d_wasm PRIVATE -pthread -msimd128 -msse2 -ffast-math -fno-trapping-math)
 target_compile_definitions(box2d_wasm PRIVATE WASM_PTHREAD_POOL_SIZE=${BOX2D_PTHREAD_POOL_SIZE})
 
-
 string(TOUPPER "${BOX2D_LTO_MODE}" _BOX2D_LTO_MODE_UPPER)
 if(_BOX2D_LTO_MODE_UPPER STREQUAL "FULL")
 	message(STATUS "Box2D WASM LTO enabled (-flto=full)")
@@ -91,8 +90,15 @@ endif()
 
 target_link_options(box2d_wasm PRIVATE ${WASM_LINK_FLAGS})
 
+# Lab demo → demo/. Weed build → weedjs/ (gitignored; build_for_weed.bat copies from there).
+if(BOX2D_WEED_INTEGRATION)
+	set(BOX2D_WASM_OUT_DIR "${CMAKE_SOURCE_DIR}/../weedjs")
+else()
+	set(BOX2D_WASM_OUT_DIR "${CMAKE_SOURCE_DIR}/../demo")
+endif()
+
 set_target_properties(box2d_wasm PROPERTIES
 	OUTPUT_NAME "box2d_wasm"
 	SUFFIX ".js"
-	RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/../demo"
+	RUNTIME_OUTPUT_DIRECTORY "${BOX2D_WASM_OUT_DIR}"
 )
