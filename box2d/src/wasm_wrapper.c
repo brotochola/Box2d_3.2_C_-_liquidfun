@@ -2582,6 +2582,116 @@ int get_particle_weight_byte_offset( void )
 }
 
 EMSCRIPTEN_KEEPALIVE
+int restore_particles( int count, const float* posXY, const float* velXY, const uint32_t* flags )
+{
+	if ( g_particles == NULL )
+	{
+		return -1;
+	}
+	if ( count < 0 || count > g_particle_capacity )
+	{
+		return -2;
+	}
+	lfParticleSystem_ClearParticles( g_particles );
+	for ( int i = 0; i < count; i++ )
+	{
+		lfParticleDef def = lfDefaultParticleDef();
+		def.position = ( b2Vec2 ){ posXY[i * 2], posXY[i * 2 + 1] };
+		def.velocity = ( b2Vec2 ){ velXY[i * 2], velXY[i * 2 + 1] };
+		def.flags = flags[i];
+		if ( lfParticleSystem_CreateParticle( g_particles, &def ) < 0 )
+		{
+			g_particle_count_value = lfParticleSystem_GetParticleCount( g_particles );
+			return -3;
+		}
+	}
+	g_particle_count_value = lfParticleSystem_GetParticleCount( g_particles );
+	if ( g_particle_x != NULL && g_particle_y != NULL )
+	{
+		const b2Vec2* pos = lfParticleSystem_GetPositionBuffer( g_particles );
+		const float* alpha = g_particle_alpha != NULL ? lfParticleSystem_GetAlphaBuffer( g_particles ) : NULL;
+		for ( int32_t i = 0; i < g_particle_count_value; i++ )
+		{
+			g_particle_x[i] = pos[i].x;
+			g_particle_y[i] = pos[i].y;
+			if ( alpha != NULL && g_particle_alpha != NULL )
+			{
+				g_particle_alpha[i] = alpha[i];
+			}
+		}
+	}
+	return g_particle_count_value;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_particle_group_index_byte_offset( void )
+{
+	if ( g_particles == NULL )
+	{
+		return 0;
+	}
+	const int* buf = lfParticleSystem_GetGroupIndexBuffer( g_particles );
+	return buf == NULL ? 0 : (int)( (uintptr_t)buf );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_particle_rest_offset_byte_offset( void )
+{
+	if ( g_particles == NULL )
+	{
+		return 0;
+	}
+	const b2Vec2* buf = lfParticleSystem_GetRestOffsetBuffer( g_particles );
+	return buf == NULL ? 0 : (int)( (uintptr_t)buf );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_particle_pair_count( void )
+{
+	return g_particles == NULL ? 0 : lfParticleSystem_GetPairCount( g_particles );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int copy_particle_group_slots( uint8_t* aliveOut, uint32_t* flagsOut, uint32_t* groupFlagsOut, float* strengthOut,
+							   float* viscousScaleOut, int* firstIndexOut, int* lastIndexOut, int maxSlots )
+{
+	if ( g_particles == NULL )
+	{
+		return 0;
+	}
+	return lfParticleSystem_CopyGroupSlots( g_particles, aliveOut, flagsOut, groupFlagsOut, strengthOut,
+											viscousScaleOut, firstIndexOut, lastIndexOut, maxSlots );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int copy_particle_pairs( uint16_t* aOut, uint16_t* bOut, uint32_t* flagsOut, float* distanceOut, float* strengthOut,
+						 int maxPairs )
+{
+	if ( g_particles == NULL )
+	{
+		return 0;
+	}
+	return lfParticleSystem_CopyPairs( g_particles, aOut, bOut, flagsOut, distanceOut, strengthOut, maxPairs );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int restore_particle_groups_and_pairs( const int* groupIndex, const float* restOffsetXY, int groupSlotCount,
+									   const uint8_t* alive, const uint32_t* flags, const uint32_t* groupFlags,
+									   const float* strength, const float* viscousScale, const int* firstIndex,
+									   const int* lastIndex, int pairCount, const uint16_t* pairA,
+									   const uint16_t* pairB, const uint32_t* pairFlags, const float* pairDistance,
+									   const float* pairStrength )
+{
+	if ( g_particles == NULL )
+	{
+		return -1;
+	}
+	return lfParticleSystem_RestoreGroupsAndPairs( g_particles, groupIndex, restOffsetXY, groupSlotCount, alive,
+												   flags, groupFlags, strength, viscousScale, firstIndex, lastIndex,
+												   pairCount, pairA, pairB, pairFlags, pairDistance, pairStrength );
+}
+
+EMSCRIPTEN_KEEPALIVE
 int get_particle_count( void )
 {
 	return g_particle_count_value;

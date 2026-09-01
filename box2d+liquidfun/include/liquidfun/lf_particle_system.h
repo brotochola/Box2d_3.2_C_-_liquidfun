@@ -123,6 +123,10 @@ B2_API int lfParticleSystem_CreateParticle( lfParticleSystem* system, const lfPa
 // next lfParticleSystem_Step (indices you are holding become invalid then).
 B2_API void lfParticleSystem_DestroyParticle( lfParticleSystem* system, int index );
 
+// Immediately remove all particles and groups (no wait-for-step). Used by save restore.
+// Does not destroy the system itself. Also clears elastic/spring pairs.
+B2_API void lfParticleSystem_ClearParticles( lfParticleSystem* system );
+
 // Convenience: fill an axis-aligned box with particles on a grid, spaced
 // `spacing` apart (0 => 0.75 * diameter, Google b2_particleStride).
 // Returns the number of particles created.
@@ -249,6 +253,29 @@ B2_API const float* lfParticleSystem_GetAlphaBuffer( const lfParticleSystem* sys
 B2_API const float* lfParticleSystem_GetViscousScaleBuffer( const lfParticleSystem* system );
 // Per-particle contact-weight density proxy (filled each sub-step in ComputeWeight).
 B2_API const float* lfParticleSystem_GetWeightBuffer( const lfParticleSystem* system );
+
+// Group membership / elastic rest pose (stable while growable=false).
+B2_API const int* lfParticleSystem_GetGroupIndexBuffer( const lfParticleSystem* system );
+B2_API const b2Vec2* lfParticleSystem_GetRestOffsetBuffer( const lfParticleSystem* system );
+B2_API int lfParticleSystem_GetPairCount( const lfParticleSystem* system );
+
+// Copy group slots (including dead holes so ids stay stable) into SoA outs.
+// Writes min(slotCount, maxSlots); returns slot count available.
+B2_API int lfParticleSystem_CopyGroupSlots( const lfParticleSystem* system, uint8_t* aliveOut, uint32_t* flagsOut,
+											uint32_t* groupFlagsOut, float* strengthOut, float* viscousScaleOut,
+											int* firstIndexOut, int* lastIndexOut, int maxSlots );
+
+// Copy spring/barrier pairs into SoA outs. Writes min(pairCount, maxPairs); returns pair count.
+B2_API int lfParticleSystem_CopyPairs( const lfParticleSystem* system, uint16_t* aOut, uint16_t* bOut,
+									   uint32_t* flagsOut, float* distanceOut, float* strengthOut, int maxPairs );
+
+// After particles exist (same indices as save), reinstall groups + restOffset + pairs.
+// groupSlotCount may include dead slots. Returns 0 on success, negative on error.
+B2_API int lfParticleSystem_RestoreGroupsAndPairs(
+	lfParticleSystem* system, const int* groupIndex, const float* restOffsetXY, int groupSlotCount,
+	const uint8_t* alive, const uint32_t* flags, const uint32_t* groupFlags, const float* strength,
+	const float* viscousScale, const int* firstIndex, const int* lastIndex, int pairCount, const uint16_t* pairA,
+	const uint16_t* pairB, const uint32_t* pairFlags, const float* pairDistance, const float* pairStrength );
 
 #ifdef __cplusplus
 }

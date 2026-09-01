@@ -577,6 +577,29 @@ void lfParticleSystem_DestroyParticle( lfParticleSystem* sys, int index )
 	sys->flags[index] |= lf_zombieParticle;
 }
 
+void lfParticleSystem_ClearParticles( lfParticleSystem* sys )
+{
+	if ( sys == NULL )
+	{
+		return;
+	}
+	for ( int i = 0; i < sys->groupCount; i++ )
+	{
+		sys->groups[i].alive = false;
+		sys->groups[i].count = 0;
+		sys->groups[i].firstIndex = 0;
+		sys->groups[i].lastIndex = 0;
+	}
+	sys->groupCount = 0;
+	sys->pairCount = 0;
+	sys->particleContactCount = 0;
+	sys->bodyContactCount = 0;
+	sys->count = 0;
+	sys->flagOr = 0;
+	sys->allGroupFlags = 0;
+	sys->hasShapeGroups = false;
+}
+
 static float DefaultParticleStride( const lfParticleSystem* sys )
 {
 	return sys->restSpacing;
@@ -3218,4 +3241,229 @@ const float* lfParticleSystem_GetAlphaBuffer( const lfParticleSystem* sys )
 const float* lfParticleSystem_GetViscousScaleBuffer( const lfParticleSystem* sys )
 {
 	return sys->viscousScale;
+}
+
+const int* lfParticleSystem_GetGroupIndexBuffer( const lfParticleSystem* sys )
+{
+	return sys != NULL ? sys->groupIndex : NULL;
+}
+
+const b2Vec2* lfParticleSystem_GetRestOffsetBuffer( const lfParticleSystem* sys )
+{
+	return sys != NULL ? sys->restOffset : NULL;
+}
+
+int lfParticleSystem_GetPairCount( const lfParticleSystem* sys )
+{
+	return sys != NULL ? sys->pairCount : 0;
+}
+
+int lfParticleSystem_CopyGroupSlots( const lfParticleSystem* sys, uint8_t* aliveOut, uint32_t* flagsOut,
+									 uint32_t* groupFlagsOut, float* strengthOut, float* viscousScaleOut,
+									 int* firstIndexOut, int* lastIndexOut, int maxSlots )
+{
+	if ( sys == NULL )
+	{
+		return 0;
+	}
+	int n = sys->groupCount;
+	int write = n < maxSlots ? n : maxSlots;
+	for ( int i = 0; i < write; i++ )
+	{
+		const lfParticleGroup* g = &sys->groups[i];
+		if ( aliveOut )
+		{
+			aliveOut[i] = g->alive ? 1 : 0;
+		}
+		if ( flagsOut )
+		{
+			flagsOut[i] = g->flags;
+		}
+		if ( groupFlagsOut )
+		{
+			groupFlagsOut[i] = g->groupFlags;
+		}
+		if ( strengthOut )
+		{
+			strengthOut[i] = g->strength;
+		}
+		if ( viscousScaleOut )
+		{
+			viscousScaleOut[i] = g->viscousScale;
+		}
+		if ( firstIndexOut )
+		{
+			firstIndexOut[i] = g->firstIndex;
+		}
+		if ( lastIndexOut )
+		{
+			lastIndexOut[i] = g->lastIndex;
+		}
+	}
+	return n;
+}
+
+int lfParticleSystem_CopyPairs( const lfParticleSystem* sys, uint16_t* aOut, uint16_t* bOut, uint32_t* flagsOut,
+								float* distanceOut, float* strengthOut, int maxPairs )
+{
+	if ( sys == NULL )
+	{
+		return 0;
+	}
+	int n = sys->pairCount;
+	int write = n < maxPairs ? n : maxPairs;
+	for ( int i = 0; i < write; i++ )
+	{
+		const lfParticlePair* p = &sys->pairs[i];
+		if ( aOut )
+		{
+			aOut[i] = p->a;
+		}
+		if ( bOut )
+		{
+			bOut[i] = p->b;
+		}
+		if ( flagsOut )
+		{
+			flagsOut[i] = p->flags;
+		}
+		if ( distanceOut )
+		{
+			distanceOut[i] = p->distance;
+		}
+		if ( strengthOut )
+		{
+			strengthOut[i] = p->strength;
+		}
+	}
+	return n;
+}
+
+static bool EnsurePairCapacity( lfParticleSystem* sys, int minCapacity )
+{
+	if ( minCapacity <= sys->pairCapacity )
+	{
+		return true;
+	}
+	int newCapacity = sys->pairCapacity > 0 ? sys->pairCapacity : 256;
+	while ( newCapacity < minCapacity )
+	{
+		newCapacity *= 2;
+	}
+	lfParticlePair* next =
+		(lfParticlePair*)realloc( sys->pairs, (size_t)newCapacity * sizeof( lfParticlePair ) );
+	if ( next == NULL )
+	{
+		return false;
+	}
+	sys->pairs = next;
+	sys->pairCapacity = newCapacity;
+	return true;
+}
+
+int lfParticleSystem_RestoreGroupsAndPairs( lfParticleSystem* sys, const int* groupIndex,
+											const float* restOffsetXY, int groupSlotCount, const uint8_t* alive,
+											const uint32_t* flags, const uint32_t* groupFlags, const float* strength,
+											const float* viscousScale, const int* firstIndex, const int* lastIndex,
+											int pairCount, const uint16_t* pairA, const uint16_t* pairB,
+											const uint32_t* pairFlags, const float* pairDistance,
+											const float* pairStrength )
+{
+	if ( sys == NULL )
+	{
+		return -1;
+	}
+	if ( groupSlotCount < 0 || pairCount < 0 )
+	{
+		return -2;
+	}
+	if ( groupSlotCount > 0 &&
+		 ( alive == NULL || flags == NULL || groupFlags == NULL || strength == NULL || viscousScale == NULL ||
+		   firstIndex == NULL || lastIndex == NULL ) )
+	{
+		return -3;
+	}
+	if ( sys->count > 0 && ( groupIndex == NULL || restOffsetXY == NULL ) )
+	{
+		return -4;
+	}
+	if ( pairCount > 0 &&
+		 ( pairA == NULL || pairB == NULL || pairFlags == NULL || pairDistance == NULL || pairStrength == NULL ) )
+	{
+		return -5;
+	}
+
+	sys->flagOr = 0;
+	for ( int i = 0; i < sys->count; i++ )
+	{
+		int gid = groupIndex[i];
+		if ( gid != LF_NULL_PARTICLE_GROUP && ( gid < 0 || gid >= groupSlotCount ) )
+		{
+			return -6;
+		}
+		sys->groupIndex[i] = gid;
+		sys->restOffset[i] = ( b2Vec2 ){ restOffsetXY[i * 2], restOffsetXY[i * 2 + 1] };
+		sys->flagOr |= sys->flags[i];
+	}
+
+	if ( groupSlotCount > 0 && !EnsureGroupCapacity( sys, groupSlotCount ) )
+	{
+		return -7;
+	}
+	sys->groupCount = groupSlotCount;
+	sys->allGroupFlags = 0;
+	sys->hasShapeGroups = false;
+	for ( int g = 0; g < groupSlotCount; g++ )
+	{
+		lfParticleGroup* slot = &sys->groups[g];
+		memset( slot, 0, sizeof( *slot ) );
+		slot->alive = alive[g] != 0;
+		slot->flags = flags[g];
+		slot->groupFlags = groupFlags[g];
+		slot->strength = strength[g];
+		slot->viscousScale = viscousScale[g] > 0.0f ? viscousScale[g] : 1.0f;
+		slot->firstIndex = firstIndex[g];
+		slot->lastIndex = lastIndex[g];
+		slot->count = slot->lastIndex - slot->firstIndex;
+		if ( !slot->alive )
+		{
+			continue;
+		}
+		if ( slot->firstIndex < 0 || slot->lastIndex < slot->firstIndex || slot->lastIndex > sys->count )
+		{
+			return -8;
+		}
+		sys->allGroupFlags |= slot->groupFlags;
+		if ( IsShapeGroupFlags( slot->flags ) )
+		{
+			sys->hasShapeGroups = true;
+		}
+	}
+
+	if ( pairCount > 0 && !EnsurePairCapacity( sys, pairCount ) )
+	{
+		return -9;
+	}
+	sys->pairCount = 0;
+	for ( int k = 0; k < pairCount; k++ )
+	{
+		uint16_t a = pairA[k];
+		uint16_t b = pairB[k];
+		if ( (int)a >= sys->count || (int)b >= sys->count )
+		{
+			return -10;
+		}
+		lfParticlePair* p = &sys->pairs[sys->pairCount++];
+		p->a = a;
+		p->b = b;
+		p->flags = pairFlags[k];
+		p->distance = pairDistance[k];
+		p->strength = pairStrength[k];
+	}
+
+	if ( sys->groupCount > 0 && sys->hasShapeGroups )
+	{
+		UpdateGroupStatistics( sys );
+	}
+	return 0;
 }
