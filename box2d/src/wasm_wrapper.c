@@ -498,6 +498,10 @@ static void export_body_move_events( b2WorldId worldId )
 		g_body_moved[count] = slot;
 		g_body_fell_asleep[count] = events.moveEvents[i].fellAsleep ? 1 : 0;
 		count++;
+
+		b2BodyId bodyId = events.moveEvents[i].bodyId;
+		b2ExportBodyState( slot, events.moveEvents[i].transform, b2Body_GetLinearVelocity( bodyId ),
+						   b2Body_GetAngularVelocity( bodyId ) );
 	}
 	g_body_move_count = count;
 }

@@ -389,6 +389,10 @@ function createPhysicsApi(Module) {
   const getParticlePosByteOffset = wrap("get_particle_pos_byte_offset", "number", []);
   const getParticleVelByteOffset = wrap("get_particle_vel_byte_offset", "number", []);
   const getParticleFlagsByteOffset = wrap("get_particle_flags_byte_offset", "number", []);
+  const getParticleXByteOffset = wrap("get_particle_x_byte_offset", "number", []);
+  const getParticleYByteOffset = wrap("get_particle_y_byte_offset", "number", []);
+  const getParticleAlphaByteOffset = wrap("get_particle_alpha_byte_offset", "number", []);
+  const getLiquidFunStepMs = wrap("get_liquidfun_step_ms", "number", []);
 
   const getStateByteOffset = wrap("get_state_byte_offset", "number", []);
   const getSleepingByteOffset = wrap("get_sleeping_byte_offset", "number", []);
@@ -1276,6 +1280,46 @@ function createPhysicsApi(Module) {
       return getParticleCount();
     }
 
+    getParticleCapacity() {
+      return getParticleCapacity();
+    }
+
+    getParticleRadius() {
+      return getParticleRadius();
+    }
+
+    getParticleCountByteOffset() {
+      return getParticleCountByteOffset();
+    }
+
+    getParticlePosByteOffset() {
+      return getParticlePosByteOffset();
+    }
+
+    getParticleVelByteOffset() {
+      return getParticleVelByteOffset();
+    }
+
+    getParticleFlagsByteOffset() {
+      return getParticleFlagsByteOffset();
+    }
+
+    getParticleXByteOffset() {
+      return getParticleXByteOffset();
+    }
+
+    getParticleYByteOffset() {
+      return getParticleYByteOffset();
+    }
+
+    getParticleAlphaByteOffset() {
+      return getParticleAlphaByteOffset();
+    }
+
+    getLiquidFunStepMs() {
+      return getLiquidFunStepMs();
+    }
+
     getSharedBuffer() {
       return Module.HEAPF32.buffer;
     }
@@ -1339,6 +1383,9 @@ function createPhysicsApi(Module) {
         particlePosByteOffset: getParticlePosByteOffset(),
         particleVelByteOffset: getParticleVelByteOffset(),
         particleFlagsByteOffset: getParticleFlagsByteOffset(),
+        particleXByteOffset: getParticleXByteOffset(),
+        particleYByteOffset: getParticleYByteOffset(),
+        particleAlphaByteOffset: getParticleAlphaByteOffset(),
       };
 
     }

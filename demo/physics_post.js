@@ -59,24 +59,24 @@
       type: BODY_TYPE.STATIC,
       x: 0,
       y: -1,
-      hx: 14,
+      hx: 21.333,
       hy: 1,
       ...MATERIAL,
     });
     w.createBox({
       type: BODY_TYPE.STATIC,
-      x: -13,
-      y: 12,
+      x: -20.5,
+      y: 11,
       hx: 1,
-      hy: 14,
+      hy: 12,
       ...MATERIAL,
     });
     w.createBox({
       type: BODY_TYPE.STATIC,
-      x: 13,
-      y: 12,
+      x: 20.5,
+      y: 11,
       hx: 1,
-      hy: 14,
+      hy: 12,
       ...MATERIAL,
     });
   }

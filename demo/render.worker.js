@@ -1,9 +1,11 @@
 // render.worker.js
 importScripts("game-constants.js", "world-bounds.js");
 
+postMessage({ type: "LOG", message: "render.worker.js script evaluated successfully" });
+
 self.onerror = function (e) {
   console.error("[render.worker] onerror:", e.message, e.filename, e.lineno, e);
-  postMessage({ type: "ERROR", worker: "render", message: e.message });
+  postMessage({ type: "ERROR", worker: "render", message: e.message || "Script error" });
 };
 
 let canvas = null;
@@ -24,16 +26,16 @@ let particleCountView = null;
 let particleCapacity = 0;
 let particleRadius = 0.045;
 let sabBuffer = null;
+let firstFrameLogged = false;
 
-const scheduleFrame =
-  typeof requestAnimationFrame === "function"
-    ? requestAnimationFrame
-    : (cb) => setTimeout(cb, 16);
+function scheduleFrame(cb) {
+  setTimeout(cb, 16);
+}
 
 const ARENA = [
-  { x: 0, y: -1, hx: 14, hy: 1 },
-  { x: -13, y: 12, hx: 1, hy: 14 },
-  { x: 13, y: 12, hx: 1, hy: 14 },
+  { x: 0, y: -1, hx: 21.333, hy: 1 },
+  { x: -20.5, y: 11, hx: 1, hy: 12 },
+  { x: 20.5, y: 11, hx: 1, hy: 12 },
 ];
 
 const COLORS = {
@@ -127,7 +129,7 @@ function drawWorldRect(cx, cy, hx, hy, angle, width, height, fillStyle) {
   const { scaleX, scaleY } = worldScale(width, height);
   ctx.save();
   ctx.translate(sx, sy);
-  ctx.rotate(angle);
+  ctx.rotate(-angle);
   ctx.fillStyle = fillStyle;
   ctx.fillRect(-hx * scaleX, -hy * scaleY, hx * 2 * scaleX, hy * 2 * scaleY);
   ctx.restore();
@@ -164,7 +166,7 @@ function drawPrismaticJoint(joint, width, height) {
 }
 
 function drawWeldJoint(joint, width, height) {
-  const angleA = Math.atan2(joint.rotS, joint.rotC);
+  const angleA = -Math.atan2(joint.rotS, joint.rotC);
   drawWorldRect(joint.ax, joint.ay, 0.12, 0.06, angleA, width, height, COLORS.jointWeldA);
   drawWorldRect(joint.bx, joint.by, 0.12, 0.06, angleA, width, height, COLORS.jointWeldB);
 }
@@ -194,33 +196,56 @@ function drawJoint(slot, width, height) {
   }
 }
 
-function drawDynamicBody(slot, width, height, scaleX, scaleY) {
-  const { shapeType, halfW, halfH } = readMetaSlot(slot);
-  const { sx, sy } = worldToScreen(px[slot], py[slot], width, height);
+function drawBody(slot, width, height, scaleX, scaleY) {
+  const { shapeType, halfW, halfH, flags } = readMetaSlot(slot);
+  const x = px[slot];
+  const y = py[slot];
   const angle = rotation[slot];
+  const isStatic = (flags & META_FLAG.STATIC) !== 0;
+
+  const { sx, sy } = worldToScreen(x, y, width, height);
 
   ctx.save();
   ctx.translate(sx, sy);
-  ctx.rotate(angle);
-  ctx.fillStyle = COLORS.dynamic;
+  ctx.rotate(-angle);
+
+  if (isStatic) {
+    ctx.fillStyle = "#334155";
+    ctx.strokeStyle = "#64748b";
+    ctx.lineWidth = 2;
+  } else {
+    ctx.fillStyle = "#cbd5e1";
+    ctx.strokeStyle = "#38bdf8";
+    ctx.lineWidth = 2;
+  }
 
   if (shapeType === SHAPE_TYPE.CIRCLE) {
+    const rPx = halfW * scaleX;
     ctx.beginPath();
-    ctx.arc(0, 0, halfW * scaleX, 0, Math.PI * 2);
+    ctx.arc(0, 0, rPx, 0, Math.PI * 2);
     ctx.fill();
-    ctx.strokeStyle = "rgba(0,0,0,0.4)";
-    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Orientation line
     ctx.beginPath();
     ctx.moveTo(0, 0);
-    ctx.lineTo(halfW * scaleX, 0);
+    ctx.lineTo(rPx, 0);
+    ctx.strokeStyle = "rgba(0,0,0,0.5)";
+    ctx.lineWidth = 2;
     ctx.stroke();
   } else {
     const screenHx = halfW * scaleX;
     const screenHy = halfH * scaleY;
     ctx.fillRect(-screenHx, -screenHy, screenHx * 2, screenHy * 2);
+    ctx.strokeRect(-screenHx, -screenHy, screenHx * 2, screenHy * 2);
+
+    // Orientation line
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(screenHx, 0);
     ctx.strokeStyle = "rgba(0,0,0,0.4)";
     ctx.lineWidth = 1.5;
-    ctx.strokeRect(-screenHx, -screenHy, screenHx * 2, screenHy * 2);
+    ctx.stroke();
   }
 
   ctx.restore();
@@ -260,16 +285,13 @@ function frame() {
       }
     }
 
-    // Draw rigid bodies
-    for (let slot = 0; slot < slotHighWater; slot++) {
+    // Draw rigid bodies (user static obstacles + dynamic crates/circles)
+    for (let slot = 3; slot < slotHighWater; slot++) {
       const { flags } = readMetaSlot(slot);
       if (flags & META_FLAG.DISABLED) {
         continue;
       }
-      if (flags & META_FLAG.STATIC) {
-        continue;
-      }
-      drawDynamicBody(slot, width, height, scaleX, scaleY);
+      drawBody(slot, width, height, scaleX, scaleY);
     }
 
     // Draw LiquidFun particles
@@ -277,7 +299,7 @@ function frame() {
       const rawCount = particleCountView[0];
       const pCount = Math.max(0, Math.min(rawCount, particleCapacity));
       const r = particleRadius || 0.045;
-      const radiusPx = Math.max(1.5, r * scaleX);
+      const radiusPx = Math.max(2.5, r * scaleX * 1.1);
       const twoPi = Math.PI * 2;
 
       const groups = {
@@ -356,9 +378,18 @@ function frame() {
       }
     }
 
+    if (!firstFrameLogged) {
+      firstFrameLogged = true;
+      postMessage({
+        type: "LOG",
+        message: `render.worker first frame rendered! pCount: ${particleCountView ? particleCountView[0] : 0}, slots: ${slotHighWater}`,
+      });
+    }
+
     reportRenderFps();
   } catch (err) {
     console.error("[render.worker] frame error:", err);
+    postMessage({ type: "ERROR", worker: "render", message: "frame error: " + (err?.message ?? String(err)) });
   }
 
   scheduleFrame(frame);
@@ -411,7 +442,7 @@ self.onmessage = (event) => {
       return;
     }
 
-    if (data.type !== "INIT") {
+    if (data.type !== "INIT" && data.type !== "READY" && !data.canvas) {
       return;
     }
 
@@ -446,9 +477,14 @@ self.onmessage = (event) => {
     }
 
     ctx = canvas.getContext("2d");
+    postMessage({
+      type: "LOG",
+      message: `render.worker INIT done: canvas ${canvas.width}x${canvas.height}, particlePosOffset: ${data.particlePosByteOffset}, particleCountOffset: ${data.particleCountByteOffset}`,
+    });
+
     scheduleFrame(frame);
   } catch (err) {
     console.error("[render.worker] onmessage error:", err);
-    postMessage({ type: "ERROR", worker: "render", message: err?.message ?? String(err) });
+    postMessage({ type: "ERROR", worker: "render", message: "onmessage error: " + (err?.message ?? String(err)) });
   }
 };

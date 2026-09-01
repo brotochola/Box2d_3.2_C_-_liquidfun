@@ -555,7 +555,7 @@
 			trackMainFps();
 
 			console.log('[main] spawning Worker(box2d_wasm.js)');
-			physicsWorker = new Worker('box2d_wasm.js');
+			physicsWorker = new Worker('box2d_wasm.js?v=' + Date.now());
 
 			physicsWorker.onmessage = (event) => {
 				const data = event.data;
@@ -568,17 +568,27 @@
 				}
 
 				if (data.type === 'READY') {
-					renderWorker = new Worker('render.worker.js');
+					console.log('[main] physics READY received, spawning render.worker.js');
+					renderWorker = new Worker('render.worker.js?v=' + Date.now());
 					renderWorker.onmessage = (fpsEvt) => {
 						if (fpsEvt.data.type === 'FPS') {
 							fpsRenderEl.textContent = fpsEvt.data.fps;
+						} else if (fpsEvt.data.type === 'LOG') {
+							console.log('[render.worker LOG]', fpsEvt.data.message);
+						} else if (fpsEvt.data.type === 'ERROR') {
+							console.error('[renderWorker ERROR]', fpsEvt.data.message);
+							statusEl.textContent = `Render Error: ${fpsEvt.data.message}`;
 						}
+					};
+					renderWorker.onerror = (error) => {
+						console.error('[main] renderWorker fatal error:', error.message || error);
+						statusEl.textContent = `Render Worker Error: ${error.message || 'Script error'}`;
 					};
 
 					renderWorker.postMessage({
-						type: 'INIT',
-						canvas: offscreen,
 						...data,
+						canvas: offscreen,
+						type: 'INIT',
 					}, [offscreen]);
 
 					physicsReady = true;
