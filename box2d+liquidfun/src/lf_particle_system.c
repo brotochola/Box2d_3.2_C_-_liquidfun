@@ -1654,6 +1654,8 @@ static void BuildGrid( lfParticleSystem* sys )
 
 #define LF_CONTACT_PARALLEL_MIN 4096
 #define LF_CONTACT_MIN_RANGE 256
+#define LF_PARTICLE_LOOP_MIN 4096
+#define LF_PARTICLE_LOOP_MIN_RANGE 256
 
 static void GrowParticleContactCap( lfParticleSystem* sys, int need )
 {
@@ -2502,26 +2504,200 @@ static void SolveBarrier( lfParticleSystem* sys, float dt )
 	}
 }
 
-static void SolveGravity( lfParticleSystem* sys, float dt )
+typedef struct lfRangeJob
 {
-	b2Vec2 gravity = b2World_GetGravity( sys->worldId );
-	b2Vec2 dv = b2MulSV( dt, gravity );
-	float* vx = sys->velX;
-	float* vy = sys->velY;
-	const int n = sys->count;
-	__m128 dvx = _mm_set1_ps( dv.x );
-	__m128 dvy = _mm_set1_ps( dv.y );
-	int i = 0;
-	for ( ; i + 4 <= n; i += 4 )
+	lfParticleSystem* sys;
+	float dt;
+	float ax;
+	float ay;
+} lfRangeJob;
+
+static int lfShouldParallelParticles( int n )
+{
+	return n >= LF_PARTICLE_LOOP_MIN && g_lfWorkerCount > 1 && g_lfEnqueue != NULL;
+}
+
+static void GravityRange( int start, int end, int workerIndex, void* context )
+{
+	(void)workerIndex;
+	lfRangeJob* job = (lfRangeJob*)context;
+	float* vx = job->sys->velX;
+	float* vy = job->sys->velY;
+	__m128 dvx = _mm_set1_ps( job->ax );
+	__m128 dvy = _mm_set1_ps( job->ay );
+	int i = start;
+	int aligned = ( i + 3 ) & ~3;
+	if ( aligned > end )
+	{
+		aligned = end;
+	}
+	for ( ; i < aligned; i++ )
+	{
+		vx[i] += job->ax;
+		vy[i] += job->ay;
+	}
+	for ( ; i + 4 <= end; i += 4 )
 	{
 		_mm_storeu_ps( vx + i, _mm_add_ps( _mm_loadu_ps( vx + i ), dvx ) );
 		_mm_storeu_ps( vy + i, _mm_add_ps( _mm_loadu_ps( vy + i ), dvy ) );
 	}
-	for ( ; i < n; i++ )
+	for ( ; i < end; i++ )
 	{
-		vx[i] += dv.x;
-		vy[i] += dv.y;
+		vx[i] += job->ax;
+		vy[i] += job->ay;
 	}
+}
+
+static void SolveGravity( lfParticleSystem* sys, float dt )
+{
+	b2Vec2 gravity = b2World_GetGravity( sys->worldId );
+	b2Vec2 dv = b2MulSV( dt, gravity );
+	lfRangeJob job = { sys, dt, dv.x, dv.y };
+	if ( lfShouldParallelParticles( sys->count ) )
+	{
+		lfParallelFor( &GravityRange, sys->count, LF_PARTICLE_LOOP_MIN_RANGE, &job );
+		return;
+	}
+	GravityRange( 0, sys->count, 0, &job );
+}
+
+static void LimitVelocityRange( int start, int end, int workerIndex, void* context )
+{
+	(void)workerIndex;
+	lfRangeJob* job = (lfRangeJob*)context;
+	float* vx = job->sys->velX;
+	float* vy = job->sys->velY;
+	const float maxSpeed = job->ax;
+	const float maxSpeedSqr = job->ay;
+	__m128 maxSpeedSqrV = _mm_set1_ps( maxSpeedSqr );
+	__m128 maxSpeedV = _mm_set1_ps( maxSpeed );
+	int i = start;
+	int aligned = ( i + 3 ) & ~3;
+	if ( aligned > end )
+	{
+		aligned = end;
+	}
+	for ( ; i < aligned; i++ )
+	{
+		float speedSqr = vx[i] * vx[i] + vy[i] * vy[i];
+		if ( speedSqr > maxSpeedSqr )
+		{
+			float s = maxSpeed / sqrtf( speedSqr );
+			vx[i] *= s;
+			vy[i] *= s;
+		}
+	}
+	for ( ; i + 4 <= end; i += 4 )
+	{
+		__m128 x = _mm_loadu_ps( vx + i );
+		__m128 y = _mm_loadu_ps( vy + i );
+		__m128 speedSqr = _mm_add_ps( _mm_mul_ps( x, x ), _mm_mul_ps( y, y ) );
+		__m128 mask = _mm_cmpgt_ps( speedSqr, maxSpeedSqrV );
+		__m128 scale = _mm_div_ps( maxSpeedV, _mm_sqrt_ps( speedSqr ) );
+		_mm_storeu_ps( vx + i, _mm_or_ps( _mm_and_ps( mask, _mm_mul_ps( x, scale ) ), _mm_andnot_ps( mask, x ) ) );
+		_mm_storeu_ps( vy + i, _mm_or_ps( _mm_and_ps( mask, _mm_mul_ps( y, scale ) ), _mm_andnot_ps( mask, y ) ) );
+	}
+	for ( ; i < end; i++ )
+	{
+		float speedSqr = vx[i] * vx[i] + vy[i] * vy[i];
+		if ( speedSqr > maxSpeedSqr )
+		{
+			float s = maxSpeed / sqrtf( speedSqr );
+			vx[i] *= s;
+			vy[i] *= s;
+		}
+	}
+}
+
+static void LimitVelocity( lfParticleSystem* sys, float dt )
+{
+	float maxSpeed = sys->diameter / dt;
+	lfRangeJob job = { sys, dt, maxSpeed, maxSpeed * maxSpeed };
+	if ( lfShouldParallelParticles( sys->count ) )
+	{
+		lfParallelFor( &LimitVelocityRange, sys->count, LF_PARTICLE_LOOP_MIN_RANGE, &job );
+		return;
+	}
+	LimitVelocityRange( 0, sys->count, 0, &job );
+}
+
+static void WallRange( int start, int end, int workerIndex, void* context )
+{
+	(void)workerIndex;
+	lfParticleSystem* sys = (lfParticleSystem*)context;
+	uint32_t* flags = sys->flags;
+	float* vx = sys->velX;
+	float* vy = sys->velY;
+	for ( int i = start; i < end; i++ )
+	{
+		if ( flags[i] & lf_wallParticle )
+		{
+			vx[i] = 0.0f;
+			vy[i] = 0.0f;
+		}
+	}
+}
+
+static void SolveWall( lfParticleSystem* sys )
+{
+	if ( ( sys->flagOr & lf_wallParticle ) == 0 )
+	{
+		return;
+	}
+	if ( lfShouldParallelParticles( sys->count ) )
+	{
+		lfParallelFor( &WallRange, sys->count, LF_PARTICLE_LOOP_MIN_RANGE, sys );
+		return;
+	}
+	WallRange( 0, sys->count, 0, sys );
+}
+
+static void IntegrateRange( int start, int end, int workerIndex, void* context )
+{
+	(void)workerIndex;
+	lfRangeJob* job = (lfRangeJob*)context;
+	float* px = job->sys->posX;
+	float* py = job->sys->posY;
+	const float* vx = job->sys->velX;
+	const float* vy = job->sys->velY;
+	const float dt = job->dt;
+	__m128 dtv = _mm_set1_ps( dt );
+	int i = start;
+	int aligned = ( i + 3 ) & ~3;
+	if ( aligned > end )
+	{
+		aligned = end;
+	}
+	for ( ; i < aligned; i++ )
+	{
+		px[i] += dt * vx[i];
+		py[i] += dt * vy[i];
+	}
+	for ( ; i + 4 <= end; i += 4 )
+	{
+		__m128 p = _mm_loadu_ps( px + i );
+		__m128 v = _mm_loadu_ps( vx + i );
+		_mm_storeu_ps( px + i, _mm_add_ps( p, _mm_mul_ps( dtv, v ) ) );
+		p = _mm_loadu_ps( py + i );
+		v = _mm_loadu_ps( vy + i );
+		_mm_storeu_ps( py + i, _mm_add_ps( p, _mm_mul_ps( dtv, v ) ) );
+	}
+	for ( ; i < end; i++ )
+	{
+		px[i] += dt * vx[i];
+		py[i] += dt * vy[i];
+	}
+}
+
+static void Integrate( lfParticleSystem* sys, float dt )
+{
+	lfRangeJob job = { sys, dt, 0.0f, 0.0f };
+	if ( lfShouldParallelParticles( sys->count ) )
+	{
+		lfParallelFor( &IntegrateRange, sys->count, LF_PARTICLE_LOOP_MIN_RANGE, &job );
+		return;
+	}
+	IntegrateRange( 0, sys->count, 0, &job );
 }
 
 static void SolvePressure( lfParticleSystem* sys, float dt )
@@ -2717,80 +2893,6 @@ static void SolvePowder( lfParticleSystem* sys, float dt )
 		b2Vec2 f = b2MulSV( powder * ( c->weight - minWeight ), c->normal );
 		{ b2Vec2 __v = b2Sub( ( (b2Vec2){ sys->velX[c->a], sys->velY[c->a] } ), f ); sys->velX[c->a] = __v.x; sys->velY[c->a] = __v.y; }
 		{ b2Vec2 __v = b2Add( ( (b2Vec2){ sys->velX[c->b], sys->velY[c->b] } ), f ); sys->velX[c->b] = __v.x; sys->velY[c->b] = __v.y; }
-	}
-}
-
-static void LimitVelocity( lfParticleSystem* sys, float dt )
-{
-	float maxSpeed = sys->diameter / dt;
-	float maxSpeedSqr = maxSpeed * maxSpeed;
-	float* vx = sys->velX;
-	float* vy = sys->velY;
-	const int n = sys->count;
-	__m128 maxSpeedSqrV = _mm_set1_ps( maxSpeedSqr );
-	__m128 maxSpeedV = _mm_set1_ps( maxSpeed );
-	int i = 0;
-	for ( ; i + 4 <= n; i += 4 )
-	{
-		__m128 x = _mm_loadu_ps( vx + i );
-		__m128 y = _mm_loadu_ps( vy + i );
-		__m128 speedSqr = _mm_add_ps( _mm_mul_ps( x, x ), _mm_mul_ps( y, y ) );
-		__m128 mask = _mm_cmpgt_ps( speedSqr, maxSpeedSqrV );
-		/* Stationary lanes: Inf scale is AND-masked out (same as old xyxy SIMD). */
-		__m128 scale = _mm_div_ps( maxSpeedV, _mm_sqrt_ps( speedSqr ) );
-		_mm_storeu_ps( vx + i, _mm_or_ps( _mm_and_ps( mask, _mm_mul_ps( x, scale ) ), _mm_andnot_ps( mask, x ) ) );
-		_mm_storeu_ps( vy + i, _mm_or_ps( _mm_and_ps( mask, _mm_mul_ps( y, scale ) ), _mm_andnot_ps( mask, y ) ) );
-	}
-	for ( ; i < n; i++ )
-	{
-		float speedSqr = vx[i] * vx[i] + vy[i] * vy[i];
-		if ( speedSqr > maxSpeedSqr )
-		{
-			float s = maxSpeed / sqrtf( speedSqr );
-			vx[i] *= s;
-			vy[i] *= s;
-		}
-	}
-}
-
-static void SolveWall( lfParticleSystem* sys )
-{
-	if ( ( sys->flagOr & lf_wallParticle ) == 0 )
-	{
-		return;
-	}
-	for ( int i = 0; i < sys->count; i++ )
-	{
-		if ( sys->flags[i] & lf_wallParticle )
-		{
-			{ b2Vec2 __v = ( b2Vec2 ){ 0.0f, 0.0f }; sys->velX[i] = __v.x; sys->velY[i] = __v.y; }
-		}
-	}
-}
-
-static void Integrate( lfParticleSystem* sys, float dt )
-{
-	/* Native SoA: advance each axis buffer independently. */
-	float* px = sys->posX;
-	float* py = sys->posY;
-	const float* vx = sys->velX;
-	const float* vy = sys->velY;
-	const int n = sys->count;
-	__m128 dtv = _mm_set1_ps( dt );
-	int i = 0;
-	for ( ; i + 4 <= n; i += 4 )
-	{
-		__m128 p = _mm_loadu_ps( px + i );
-		__m128 v = _mm_loadu_ps( vx + i );
-		_mm_storeu_ps( px + i, _mm_add_ps( p, _mm_mul_ps( dtv, v ) ) );
-		p = _mm_loadu_ps( py + i );
-		v = _mm_loadu_ps( vy + i );
-		_mm_storeu_ps( py + i, _mm_add_ps( p, _mm_mul_ps( dtv, v ) ) );
-	}
-	for ( ; i < n; i++ )
-	{
-		px[i] += dt * vx[i];
-		py[i] += dt * vy[i];
 	}
 }
 
