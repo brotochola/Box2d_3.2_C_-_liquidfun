@@ -38,10 +38,11 @@ static void DumpFrame( int frameIndex, lfParticleSystem* ps, b2BodyId boxId )
 	fprintf( f, "box,%f,%f,%f\n", boxPos.x, boxPos.y, boxAngle );
 
 	int count = lfParticleSystem_GetParticleCount( ps );
-	const b2Vec2* pos = lfParticleSystem_GetPositionBuffer( ps );
+	const float* posX = lfParticleSystem_GetPositionXBuffer( ps );
+	const float* posY = lfParticleSystem_GetPositionYBuffer( ps );
 	for ( int i = 0; i < count; i++ )
 	{
-		fprintf( f, "p,%f,%f\n", pos[i].x, pos[i].y );
+		fprintf( f, "p,%f,%f\n", posX[i], posY[i] );
 	}
 	fclose( f );
 }
@@ -127,20 +128,21 @@ int main( void )
 
 				b2Pos bp = b2Body_GetPosition( boxId );
 				int count = lfParticleSystem_GetParticleCount( ps );
-				const b2Vec2* pos = lfParticleSystem_GetPositionBuffer( ps );
+				const float* posX = lfParticleSystem_GetPositionXBuffer( ps );
+				const float* posY = lfParticleSystem_GetPositionYBuffer( ps );
 				float minY = 1e9f, maxY = -1e9f, avgY = 0.0f;
 				float minX = 1e9f, maxX = -1e9f;
 				for ( int i = 0; i < count; i++ )
 				{
-					if ( pos[i].y < minY )
-						minY = pos[i].y;
-					if ( pos[i].y > maxY )
-						maxY = pos[i].y;
-					if ( pos[i].x < minX )
-						minX = pos[i].x;
-					if ( pos[i].x > maxX )
-						maxX = pos[i].x;
-					avgY += pos[i].y;
+					if ( posY[i] < minY )
+						minY = posY[i];
+					if ( posY[i] > maxY )
+						maxY = posY[i];
+					if ( posX[i] < minX )
+						minX = posX[i];
+					if ( posX[i] > maxX )
+						maxX = posX[i];
+					avgY += posY[i];
 				}
 				avgY /= (float)count;
 

@@ -391,6 +391,8 @@ function createPhysicsApi(Module) {
   const getParticleFlagsByteOffset = wrap("get_particle_flags_byte_offset", "number", []);
   const getParticleXByteOffset = wrap("get_particle_x_byte_offset", "number", []);
   const getParticleYByteOffset = wrap("get_particle_y_byte_offset", "number", []);
+  const getParticleVxByteOffset = wrap("get_particle_vx_byte_offset", "number", []);
+  const getParticleVyByteOffset = wrap("get_particle_vy_byte_offset", "number", []);
   const getParticleAlphaByteOffset = wrap("get_particle_alpha_byte_offset", "number", []);
   const getLiquidFunStepMs = wrap("get_liquidfun_step_ms", "number", []);
 
@@ -1312,6 +1314,14 @@ function createPhysicsApi(Module) {
       return getParticleYByteOffset();
     }
 
+    getParticleVxByteOffset() {
+      return getParticleVxByteOffset();
+    }
+
+    getParticleVyByteOffset() {
+      return getParticleVyByteOffset();
+    }
+
     getParticleAlphaByteOffset() {
       return getParticleAlphaByteOffset();
     }
@@ -1385,6 +1395,8 @@ function createPhysicsApi(Module) {
         particleFlagsByteOffset: getParticleFlagsByteOffset(),
         particleXByteOffset: getParticleXByteOffset(),
         particleYByteOffset: getParticleYByteOffset(),
+        particleVxByteOffset: getParticleVxByteOffset(),
+        particleVyByteOffset: getParticleVyByteOffset(),
         particleAlphaByteOffset: getParticleAlphaByteOffset(),
       };
 

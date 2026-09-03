@@ -241,8 +241,10 @@ B2_API void lfParticleSystem_Step( lfParticleSystem* system, float dt, int subSt
 B2_API int lfParticleSystem_GetParticleCount( const lfParticleSystem* system );
 B2_API int lfParticleSystem_GetCapacity( const lfParticleSystem* system );
 B2_API float lfParticleSystem_GetRadius( const lfParticleSystem* system );
-B2_API const b2Vec2* lfParticleSystem_GetPositionBuffer( const lfParticleSystem* system );
-B2_API const b2Vec2* lfParticleSystem_GetVelocityBuffer( const lfParticleSystem* system );
+B2_API const float* lfParticleSystem_GetPositionXBuffer( const lfParticleSystem* system );
+B2_API const float* lfParticleSystem_GetPositionYBuffer( const lfParticleSystem* system );
+B2_API const float* lfParticleSystem_GetVelocityXBuffer( const lfParticleSystem* system );
+B2_API const float* lfParticleSystem_GetVelocityYBuffer( const lfParticleSystem* system );
 B2_API const uint32_t* lfParticleSystem_GetFlagsBuffer( const lfParticleSystem* system );
 // 1.0 for particles with no lifespan tracking, and for tracked particles
 // created without fadeToAlpha0. When fadeToAlpha0 was set at create, ramps

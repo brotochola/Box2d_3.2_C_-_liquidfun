@@ -102,8 +102,10 @@ struct lfParticleSystem
 
 	int count;
 	int capacity;
-	b2Vec2* position;
-	b2Vec2* velocity;
+	float* posX;
+	float* posY;
+	float* velX;
+	float* velY;
 	float* weight; // per-particle accumulated contact weight (density proxy)
 	uint32_t* flags;
 	int* groupIndex;
@@ -241,7 +243,7 @@ static void CapturePairs( lfParticleSystem* sys, int start, int n )
 	for ( int i = start; i < start + n; i++ )
 	{
 		int ix, iy;
-		GetCell( sys, sys->position[i], &ix, &iy );
+		GetCell( sys, ( (b2Vec2){ sys->posX[i], sys->posY[i] } ), &ix, &iy );
 		sys->cellX[i] = ix;
 		sys->cellY[i] = iy;
 		uint32_t cell = HashCell( ix, iy, sys->hashSize );
@@ -268,7 +270,7 @@ static void CapturePairs( lfParticleSystem* sys, int start, int n )
 					{
 						continue; // each unordered pair is only added once, from the lower index
 					}
-					b2Vec2 delta = b2Sub( sys->position[j], sys->position[i] );
+					b2Vec2 delta = b2Sub( ( (b2Vec2){ sys->posX[j], sys->posY[j] } ), ( (b2Vec2){ sys->posX[i], sys->posY[i] } ) );
 					float distSqr = b2LengthSquared( delta );
 					if ( distSqr < maxDistSqr && distSqr > 1e-9f )
 					{
@@ -375,8 +377,10 @@ static bool EnsureCapacity( lfParticleSystem* sys, int minCapacity )
 		newCapacity *= 2;
 	}
 
-	sys->position = (b2Vec2*)realloc( sys->position, (size_t)newCapacity * sizeof( b2Vec2 ) );
-	sys->velocity = (b2Vec2*)realloc( sys->velocity, (size_t)newCapacity * sizeof( b2Vec2 ) );
+	sys->posX = (float*)realloc( sys->posX, (size_t)newCapacity * sizeof( float ) );
+	sys->posY = (float*)realloc( sys->posY, (size_t)newCapacity * sizeof( float ) );
+	sys->velX = (float*)realloc( sys->velX, (size_t)newCapacity * sizeof( float ) );
+	sys->velY = (float*)realloc( sys->velY, (size_t)newCapacity * sizeof( float ) );
 	sys->weight = (float*)realloc( sys->weight, (size_t)newCapacity * sizeof( float ) );
 	sys->flags = (uint32_t*)realloc( sys->flags, (size_t)newCapacity * sizeof( uint32_t ) );
 	sys->next = (uint16_t*)realloc( sys->next, (size_t)newCapacity * sizeof( uint16_t ) );
@@ -451,8 +455,10 @@ lfParticleSystem* lfParticleSystem_Create( b2WorldId worldId, const lfParticleSy
 	{
 		// Pin every per-particle buffer now. realloc later would invalidate
 		// WASM/SAB TypedArray views onto these pointers.
-		sys->position = (b2Vec2*)malloc( (size_t)hint * sizeof( b2Vec2 ) );
-		sys->velocity = (b2Vec2*)malloc( (size_t)hint * sizeof( b2Vec2 ) );
+		sys->posX = (float*)malloc( (size_t)hint * sizeof( float ) );
+		sys->posY = (float*)malloc( (size_t)hint * sizeof( float ) );
+		sys->velX = (float*)malloc( (size_t)hint * sizeof( float ) );
+		sys->velY = (float*)malloc( (size_t)hint * sizeof( float ) );
 		sys->weight = (float*)malloc( (size_t)hint * sizeof( float ) );
 		sys->flags = (uint32_t*)malloc( (size_t)hint * sizeof( uint32_t ) );
 		sys->next = (uint16_t*)malloc( (size_t)hint * sizeof( uint16_t ) );
@@ -504,8 +510,10 @@ void lfParticleSystem_Destroy( lfParticleSystem* sys )
 	{
 		return;
 	}
-	free( sys->position );
-	free( sys->velocity );
+	free( sys->posX );
+	free( sys->posY );
+	free( sys->velX );
+	free( sys->velY );
 	free( sys->weight );
 	free( sys->flags );
 	free( sys->next );
@@ -548,8 +556,10 @@ int lfParticleSystem_CreateParticle( lfParticleSystem* sys, const lfParticleDef*
 	}
 
 	int i = sys->count++;
-	sys->position[i] = def->position;
-	sys->velocity[i] = def->velocity;
+	sys->posX[i] = def->position.x;
+	sys->posY[i] = def->position.y;
+	sys->velX[i] = def->velocity.x;
+	sys->velY[i] = def->velocity.y;
 	sys->weight[i] = 0.0f;
 	sys->flags[i] = def->flags;
 	sys->flagOr |= def->flags;
@@ -677,7 +687,7 @@ static void InitGroupFromRange( lfParticleSystem* sys, int gid, int start, int n
 	b2Vec2 com = { 0.0f, 0.0f };
 	for ( int i = start; i < start + n; i++ )
 	{
-		com = b2Add( com, sys->position[i] );
+		com = b2Add( com, ( (b2Vec2){ sys->posX[i], sys->posY[i] } ) );
 	}
 	com = b2MulSV( 1.0f / (float)n, com );
 
@@ -693,12 +703,12 @@ static void InitGroupFromRange( lfParticleSystem* sys, int gid, int start, int n
 	{
 		sys->groupIndex[i] = gid;
 		sys->flags[i] |= def->flags;
-		b2Vec2 offset = b2Sub( sys->position[i], com );
+		b2Vec2 offset = b2Sub( ( (b2Vec2){ sys->posX[i], sys->posY[i] } ), com );
 		sys->restOffset[i] = offset;
 		inertia += sys->particleMass * b2LengthSquared( offset );
 
 		b2Vec2 spin = b2MulSV( def->angularVelocity, b2LeftPerp( offset ) );
-		sys->velocity[i] = b2Add( def->linearVelocity, spin );
+		{ b2Vec2 __v = b2Add( def->linearVelocity, spin ); sys->velX[i] = __v.x; sys->velY[i] = __v.y; }
 	}
 	g->invInertia = inertia > 0.0f ? 1.0f / inertia : 0.0f;
 
@@ -1025,8 +1035,8 @@ static void UpdateGroupStatistics( lfParticleSystem* sys )
 		}
 		for ( int i = group->firstIndex; i < group->lastIndex; i++ )
 		{
-			group->center = b2Add( group->center, sys->position[i] );
-			group->linearVelocity = b2Add( group->linearVelocity, sys->velocity[i] );
+			group->center = b2Add( group->center, ( (b2Vec2){ sys->posX[i], sys->posY[i] } ) );
+			group->linearVelocity = b2Add( group->linearVelocity, ( (b2Vec2){ sys->velX[i], sys->velY[i] } ) );
 		}
 		float inv = 1.0f / (float)group->count;
 		group->center = b2MulSV( inv, group->center );
@@ -1041,12 +1051,12 @@ static void UpdateGroupStatistics( lfParticleSystem* sys )
 		group->accI = 0.0f;
 		for ( int i = group->firstIndex; i < group->lastIndex; i++ )
 		{
-			b2Vec2 p = b2Sub( sys->position[i], group->center );
+			b2Vec2 p = b2Sub( ( (b2Vec2){ sys->posX[i], sys->posY[i] } ), group->center );
 			b2Vec2 q = sys->restOffset[i];
 			group->accDot += p.x * q.x + p.y * q.y;
 			group->accCross += p.y * q.x - p.x * q.y;
 
-			b2Vec2 relV = b2Sub( sys->velocity[i], group->linearVelocity );
+			b2Vec2 relV = b2Sub( ( (b2Vec2){ sys->velX[i], sys->velY[i] } ), group->linearVelocity );
 			group->accSpin += p.x * relV.y - p.y * relV.x;
 			group->accR2 += b2LengthSquared( p );
 			group->accI += sys->particleMass * b2LengthSquared( q );
@@ -1081,8 +1091,8 @@ static void SolveElastic( lfParticleSystem* sys, float dt )
 				continue;
 			}
 			b2Vec2 target = b2Add( group->center, RotateOffset( c, s, sys->restOffset[i] ) );
-			b2Vec2 delta = b2Sub( target, sys->position[i] );
-			sys->velocity[i] = b2Add( sys->velocity[i], b2MulSV( group->strength * invDt, delta ) );
+			b2Vec2 delta = b2Sub( target, ( (b2Vec2){ sys->posX[i], sys->posY[i] } ) );
+			{ b2Vec2 __v = b2Add( ( (b2Vec2){ sys->velX[i], sys->velY[i] } ), b2MulSV( group->strength * invDt, delta ) ); sys->velX[i] = __v.x; sys->velY[i] = __v.y; }
 		}
 	}
 }
@@ -1109,7 +1119,7 @@ static void SolveSpring( lfParticleSystem* sys, float dt )
 			continue;
 		}
 
-		b2Vec2 delta = b2Sub( sys->position[b], sys->position[a] );
+		b2Vec2 delta = b2Sub( ( (b2Vec2){ sys->posX[b], sys->posY[b] } ), ( (b2Vec2){ sys->posX[a], sys->posY[a] } ) );
 		float distSqr = b2LengthSquared( delta );
 		if ( distSqr < 1e-9f )
 		{
@@ -1125,11 +1135,11 @@ static void SolveSpring( lfParticleSystem* sys, float dt )
 
 		if ( ( sys->flags[a] & lf_wallParticle ) == 0 )
 		{
-			sys->velocity[a] = b2Add( sys->velocity[a], impulse );
+			{ b2Vec2 __v = b2Add( ( (b2Vec2){ sys->velX[a], sys->velY[a] } ), impulse ); sys->velX[a] = __v.x; sys->velY[a] = __v.y; }
 		}
 		if ( ( sys->flags[b] & lf_wallParticle ) == 0 )
 		{
-			sys->velocity[b] = b2Sub( sys->velocity[b], impulse );
+			{ b2Vec2 __v = b2Sub( ( (b2Vec2){ sys->velX[b], sys->velY[b] } ), impulse ); sys->velX[b] = __v.x; sys->velY[b] = __v.y; }
 		}
 	}
 }
@@ -1179,8 +1189,10 @@ static void CopyParticle( lfParticleSystem* sys, int dst, int src )
 	{
 		return;
 	}
-	sys->position[dst] = sys->position[src];
-	sys->velocity[dst] = sys->velocity[src];
+	sys->posX[dst] = sys->posX[src];
+	sys->posY[dst] = sys->posY[src];
+	sys->velX[dst] = sys->velX[src];
+	sys->velY[dst] = sys->velY[src];
 	sys->weight[dst] = sys->weight[src];
 	sys->flags[dst] = sys->flags[src];
 	sys->groupIndex[dst] = sys->groupIndex[src];
@@ -1302,8 +1314,10 @@ static void RotateBuffer( lfParticleSystem* sys, int start, int mid, int end )
 	{
 		return;
 	}
-	RotateTyped( sys->position, sizeof( b2Vec2 ), start, mid, end );
-	RotateTyped( sys->velocity, sizeof( b2Vec2 ), start, mid, end );
+	RotateTyped( sys->posX, sizeof( float ), start, mid, end );
+	RotateTyped( sys->posY, sizeof( float ), start, mid, end );
+	RotateTyped( sys->velX, sizeof( float ), start, mid, end );
+	RotateTyped( sys->velY, sizeof( float ), start, mid, end );
 	RotateTyped( sys->weight, sizeof( float ), start, mid, end );
 	RotateTyped( sys->flags, sizeof( uint32_t ), start, mid, end );
 	RotateTyped( sys->groupIndex, sizeof( int ), start, mid, end );
@@ -1473,7 +1487,7 @@ static void BuildGrid( lfParticleSystem* sys )
 	for ( int i = 0; i < sys->count; i++ )
 	{
 		int ix, iy;
-		GetCell( sys, sys->position[i], &ix, &iy );
+		GetCell( sys, ( (b2Vec2){ sys->posX[i], sys->posY[i] } ), &ix, &iy );
 		sys->cellX[i] = ix;
 		sys->cellY[i] = iy;
 		uint32_t cell = HashCell( ix, iy, sys->hashSize );
@@ -1521,7 +1535,7 @@ static void FindParticleContacts( lfParticleSystem* sys )
 					{
 						continue; // each unordered pair is only added once, from the lower index
 					}
-					b2Vec2 delta = b2Sub( sys->position[j], sys->position[i] );
+					b2Vec2 delta = b2Sub( ( (b2Vec2){ sys->posX[j], sys->posY[j] } ), ( (b2Vec2){ sys->posX[i], sys->posY[i] } ) );
 					float distSqr = b2LengthSquared( delta );
 					if ( distSqr < squaredDiameter && distSqr > 1e-9f )
 					{
@@ -1709,7 +1723,7 @@ static void ShapeComputeDistance( b2ShapeId shapeId, b2Pos ap, b2Vec2* nOut, flo
 
 static void ContactParticleWithShape( lfParticleSystem* sys, int i, b2ShapeId shapeId )
 {
-	b2Pos ap = sys->position[i];
+	b2Pos ap = ( (b2Vec2){ sys->posX[i], sys->posY[i] } );
 	b2Vec2 nCompute;
 	float d;
 	ShapeComputeDistance( shapeId, ap, &nCompute, &d );
@@ -1814,7 +1828,7 @@ static void FindBodyContacts( lfParticleSystem* sys )
 // drop if that probe is not on/in the fixture. Keep at most 3 per particle.
 static bool BodyContactSurvives( const lfParticleSystem* sys, const lfBodyContact* c )
 {
-	b2Vec2 p = sys->position[c->index];
+	b2Vec2 p = ( (b2Vec2){ sys->posX[c->index], sys->posY[c->index] } );
 	float travel = sys->diameter * ( 1.0f - c->weight );
 	b2Vec2 probe = b2Add( p, b2MulSV( travel, c->normal ) );
 	if ( b2Shape_TestPoint( c->shapeId, probe ) )
@@ -1890,8 +1904,8 @@ static b2AABB ComputeSweptCloudAABB( const lfParticleSystem* sys, float dt, floa
 	b2AABB aabb = { { 1e9f, 1e9f }, { -1e9f, -1e9f } };
 	for ( int i = 0; i < sys->count; i++ )
 	{
-		b2Vec2 p = sys->position[i];
-		b2Vec2 p2 = b2Add( p, b2MulSV( dt, sys->velocity[i] ) );
+		b2Vec2 p = ( (b2Vec2){ sys->posX[i], sys->posY[i] } );
+		b2Vec2 p2 = b2Add( p, b2MulSV( dt, ( (b2Vec2){ sys->velX[i], sys->velY[i] } ) ) );
 		float minx = p.x < p2.x ? p.x : p2.x;
 		float miny = p.y < p2.y ? p.y : p2.y;
 		float maxx = p.x > p2.x ? p.x : p2.x;
@@ -1924,7 +1938,7 @@ static void StopAtSurface( lfParticleSystem* sys, int i, b2Vec2 p, b2Vec2 p1, b2
 {
 	b2Vec2 hit = b2Add( b2MulSV( 1.0f - fraction, p1 ), b2MulSV( fraction, p2 ) );
 	b2Vec2 target = b2Add( hit, b2MulSV( B2_LINEAR_SLOP, n ) );
-	sys->velocity[i] = b2MulSV( s_collisionInvDt, b2Sub( target, p ) );
+	{ b2Vec2 __v = b2MulSV( s_collisionInvDt, b2Sub( target, p ) ); sys->velX[i] = __v.x; sys->velY[i] = __v.y; }
 }
 
 static void RayCastParticleShape( lfParticleSystem* sys, int i, b2ShapeId shapeId )
@@ -1934,8 +1948,8 @@ static void RayCastParticleShape( lfParticleSystem* sys, int i, b2ShapeId shapeI
 		return;
 	}
 
-	b2Pos p = sys->position[i];
-	b2Vec2 translation = b2MulSV( s_collisionDt, sys->velocity[i] );
+	b2Pos p = ( (b2Vec2){ sys->posX[i], sys->posY[i] } );
+	b2Vec2 translation = b2MulSV( s_collisionDt, ( (b2Vec2){ sys->velX[i], sys->velY[i] } ) );
 	b2WorldCastOutput hit = { 0 };
 	if ( b2LengthSquared( translation ) >= 1e-12f )
 	{
@@ -2151,7 +2165,7 @@ static void SolveBarrier( lfParticleSystem* sys, float dt )
 	{
 		if ( ( sys->flags[i] & wallBarrier ) == wallBarrier )
 		{
-			sys->velocity[i] = ( b2Vec2 ){ 0.0f, 0.0f };
+			{ b2Vec2 __v = ( b2Vec2 ){ 0.0f, 0.0f }; sys->velX[i] = __v.x; sys->velY[i] = __v.y; }
 		}
 	}
 
@@ -2172,10 +2186,10 @@ static void SolveBarrier( lfParticleSystem* sys, float dt )
 			continue;
 		}
 
-		b2Vec2 pa = sys->position[a];
-		b2Vec2 pb = sys->position[b];
-		b2Vec2 va = sys->velocity[a];
-		b2Vec2 vb = sys->velocity[b];
+		b2Vec2 pa = ( (b2Vec2){ sys->posX[a], sys->posY[a] } );
+		b2Vec2 pb = ( (b2Vec2){ sys->posX[b], sys->posY[b] } );
+		b2Vec2 va = ( (b2Vec2){ sys->velX[a], sys->velY[a] } );
+		b2Vec2 vb = ( (b2Vec2){ sys->velX[b], sys->velY[b] } );
 		b2Vec2 pba = b2Sub( pb, pa );
 		b2Vec2 vba = b2Sub( vb, va );
 
@@ -2206,8 +2220,8 @@ static void SolveBarrier( lfParticleSystem* sys, float dt )
 						continue;
 					}
 
-					b2Vec2 pc = sys->position[c];
-					b2Vec2 vc = sys->velocity[c];
+					b2Vec2 pc = ( (b2Vec2){ sys->posX[c], sys->posY[c] } );
+					b2Vec2 vc = ( (b2Vec2){ sys->velX[c], sys->velY[c] } );
 					b2Vec2 pca = b2Sub( pc, pa );
 					b2Vec2 vca = b2Sub( vc, va );
 					float e2 = b2Cross( vba, vca );
@@ -2219,7 +2233,7 @@ static void SolveBarrier( lfParticleSystem* sys, float dt )
 						continue;
 					}
 					b2Vec2 dv = b2Sub( b2Add( va, b2MulSV( s, vba ) ), vc );
-					sys->velocity[c] = b2Add( sys->velocity[c], dv );
+					{ b2Vec2 __v = b2Add( ( (b2Vec2){ sys->velX[c], sys->velY[c] } ), dv ); sys->velX[c] = __v.x; sys->velY[c] = __v.y; }
 				}
 			}
 		}
@@ -2230,17 +2244,21 @@ static void SolveGravity( lfParticleSystem* sys, float dt )
 {
 	b2Vec2 gravity = b2World_GetGravity( sys->worldId );
 	b2Vec2 dv = b2MulSV( dt, gravity );
-	float* vel = (float*)sys->velocity;
-	int n = sys->count * 2; // flat floats; dv=(dx,dy) repeats with period 2
-	__m128 dv4 = _mm_setr_ps( dv.x, dv.y, dv.x, dv.y );
+	float* vx = sys->velX;
+	float* vy = sys->velY;
+	const int n = sys->count;
+	__m128 dvx = _mm_set1_ps( dv.x );
+	__m128 dvy = _mm_set1_ps( dv.y );
 	int i = 0;
 	for ( ; i + 4 <= n; i += 4 )
 	{
-		_mm_storeu_ps( vel + i, _mm_add_ps( _mm_loadu_ps( vel + i ), dv4 ) );
+		_mm_storeu_ps( vx + i, _mm_add_ps( _mm_loadu_ps( vx + i ), dvx ) );
+		_mm_storeu_ps( vy + i, _mm_add_ps( _mm_loadu_ps( vy + i ), dvy ) );
 	}
 	for ( ; i < n; i++ )
 	{
-		vel[i] += ( i & 1 ) ? dv.y : dv.x;
+		vx[i] += dv.x;
+		vy[i] += dv.y;
 	}
 }
 
@@ -2286,16 +2304,16 @@ static void SolvePressure( lfParticleSystem* sys, float dt )
 		float w = c->weight;
 		float hp = h[a] + pressurePerWeight * w;
 		b2Vec2 f = b2MulSV( velocityPerPressure * w * c->mass * hp, c->normal );
-		sys->velocity[a] = b2Sub( sys->velocity[a], b2MulSV( c->invMassA, f ) );
-		b2Body_ApplyLinearImpulse( c->bodyId, f, sys->position[a], true );
+		{ b2Vec2 __v = b2Sub( ( (b2Vec2){ sys->velX[a], sys->velY[a] } ), b2MulSV( c->invMassA, f ) ); sys->velX[a] = __v.x; sys->velY[a] = __v.y; }
+		b2Body_ApplyLinearImpulse( c->bodyId, f, ( (b2Vec2){ sys->posX[a], sys->posY[a] } ), true );
 	}
 	for ( int idx = 0; idx < sys->particleContactCount; idx++ )
 	{
 		const lfParticleContact* c = &sys->particleContacts[idx];
 		float hp = h[c->a] + h[c->b];
 		b2Vec2 f = b2MulSV( velocityPerPressure * c->weight * hp, c->normal );
-		sys->velocity[c->a] = b2Sub( sys->velocity[c->a], f );
-		sys->velocity[c->b] = b2Add( sys->velocity[c->b], f );
+		{ b2Vec2 __v = b2Sub( ( (b2Vec2){ sys->velX[c->a], sys->velY[c->a] } ), f ); sys->velX[c->a] = __v.x; sys->velY[c->a] = __v.y; }
+		{ b2Vec2 __v = b2Add( ( (b2Vec2){ sys->velX[c->b], sys->velY[c->b] } ), f ); sys->velX[c->b] = __v.x; sys->velY[c->b] = __v.y; }
 	}
 }
 
@@ -2307,8 +2325,8 @@ static void SolveDamping( lfParticleSystem* sys, float dt )
 	{
 		const lfBodyContact* c = &sys->bodyContacts[idx];
 		int a = (int)c->index;
-		b2Vec2 p = sys->position[a];
-		b2Vec2 v = b2Sub( b2Body_GetWorldPointVelocity( c->bodyId, p ), sys->velocity[a] );
+		b2Vec2 p = ( (b2Vec2){ sys->posX[a], sys->posY[a] } );
+		b2Vec2 v = b2Sub( b2Body_GetWorldPointVelocity( c->bodyId, p ), ( (b2Vec2){ sys->velX[a], sys->velY[a] } ) );
 		float vn = b2Dot( v, c->normal );
 		if ( vn >= 0.0f )
 		{
@@ -2316,13 +2334,13 @@ static void SolveDamping( lfParticleSystem* sys, float dt )
 		}
 		float damping = fmaxf( linearDamping * c->weight, fminf( -quadraticDamping * vn, 0.5f ) );
 		b2Vec2 f = b2MulSV( damping * c->mass * vn, c->normal );
-		sys->velocity[a] = b2Add( sys->velocity[a], b2MulSV( c->invMassA, f ) );
+		{ b2Vec2 __v = b2Add( ( (b2Vec2){ sys->velX[a], sys->velY[a] } ), b2MulSV( c->invMassA, f ) ); sys->velX[a] = __v.x; sys->velY[a] = __v.y; }
 		b2Body_ApplyLinearImpulse( c->bodyId, b2Neg( f ), p, true );
 	}
 	for ( int idx = 0; idx < sys->particleContactCount; idx++ )
 	{
 		const lfParticleContact* c = &sys->particleContacts[idx];
-		b2Vec2 v = b2Sub( sys->velocity[c->b], sys->velocity[c->a] );
+		b2Vec2 v = b2Sub( ( (b2Vec2){ sys->velX[c->b], sys->velY[c->b] } ), ( (b2Vec2){ sys->velX[c->a], sys->velY[c->a] } ) );
 		float vn = b2Dot( v, c->normal );
 		if ( vn >= 0.0f )
 		{
@@ -2330,8 +2348,8 @@ static void SolveDamping( lfParticleSystem* sys, float dt )
 		}
 		float damping = fmaxf( linearDamping * c->weight, fminf( -quadraticDamping * vn, 0.5f ) );
 		b2Vec2 f = b2MulSV( damping * vn, c->normal );
-		sys->velocity[c->a] = b2Add( sys->velocity[c->a], f );
-		sys->velocity[c->b] = b2Sub( sys->velocity[c->b], f );
+		{ b2Vec2 __v = b2Add( ( (b2Vec2){ sys->velX[c->a], sys->velY[c->a] } ), f ); sys->velX[c->a] = __v.x; sys->velY[c->a] = __v.y; }
+		{ b2Vec2 __v = b2Sub( ( (b2Vec2){ sys->velX[c->b], sys->velY[c->b] } ), f ); sys->velX[c->b] = __v.x; sys->velY[c->b] = __v.y; }
 	}
 }
 
@@ -2351,10 +2369,10 @@ static void SolveViscous( lfParticleSystem* sys )
 			continue;
 		}
 		float viscous = viscousBase * sys->viscousScale[a];
-		b2Vec2 p = sys->position[a];
-		b2Vec2 v = b2Sub( b2Body_GetWorldPointVelocity( c->bodyId, p ), sys->velocity[a] );
+		b2Vec2 p = ( (b2Vec2){ sys->posX[a], sys->posY[a] } );
+		b2Vec2 v = b2Sub( b2Body_GetWorldPointVelocity( c->bodyId, p ), ( (b2Vec2){ sys->velX[a], sys->velY[a] } ) );
 		b2Vec2 f = b2MulSV( viscous * c->mass * c->weight, v );
-		sys->velocity[a] = b2Add( sys->velocity[a], b2MulSV( c->invMassA, f ) );
+		{ b2Vec2 __v = b2Add( ( (b2Vec2){ sys->velX[a], sys->velY[a] } ), b2MulSV( c->invMassA, f ) ); sys->velX[a] = __v.x; sys->velY[a] = __v.y; }
 		b2Body_ApplyLinearImpulse( c->bodyId, b2Neg( f ), p, true );
 	}
 	for ( int idx = 0; idx < sys->particleContactCount; idx++ )
@@ -2365,10 +2383,10 @@ static void SolveViscous( lfParticleSystem* sys )
 			continue;
 		}
 		float viscous = viscousBase * 0.5f * ( sys->viscousScale[c->a] + sys->viscousScale[c->b] );
-		b2Vec2 v = b2Sub( sys->velocity[c->b], sys->velocity[c->a] );
+		b2Vec2 v = b2Sub( ( (b2Vec2){ sys->velX[c->b], sys->velY[c->b] } ), ( (b2Vec2){ sys->velX[c->a], sys->velY[c->a] } ) );
 		b2Vec2 f = b2MulSV( viscous * c->weight, v );
-		sys->velocity[c->a] = b2Add( sys->velocity[c->a], f );
-		sys->velocity[c->b] = b2Sub( sys->velocity[c->b], f );
+		{ b2Vec2 __v = b2Add( ( (b2Vec2){ sys->velX[c->a], sys->velY[c->a] } ), f ); sys->velX[c->a] = __v.x; sys->velY[c->a] = __v.y; }
+		{ b2Vec2 __v = b2Sub( ( (b2Vec2){ sys->velX[c->b], sys->velY[c->b] } ), f ); sys->velX[c->b] = __v.x; sys->velY[c->b] = __v.y; }
 	}
 }
 
@@ -2410,8 +2428,8 @@ static void SolveTensile( lfParticleSystem* sys, float dt )
 		}
 		fn *= c->weight;
 		b2Vec2 f = b2MulSV( fn, c->normal );
-		sys->velocity[c->a] = b2Sub( sys->velocity[c->a], f );
-		sys->velocity[c->b] = b2Add( sys->velocity[c->b], f );
+		{ b2Vec2 __v = b2Sub( ( (b2Vec2){ sys->velX[c->a], sys->velY[c->a] } ), f ); sys->velX[c->a] = __v.x; sys->velY[c->a] = __v.y; }
+		{ b2Vec2 __v = b2Add( ( (b2Vec2){ sys->velX[c->b], sys->velY[c->b] } ), f ); sys->velX[c->b] = __v.x; sys->velY[c->b] = __v.y; }
 	}
 }
 
@@ -2435,8 +2453,8 @@ static void SolvePowder( lfParticleSystem* sys, float dt )
 			continue;
 		}
 		b2Vec2 f = b2MulSV( powder * ( c->weight - minWeight ), c->normal );
-		sys->velocity[c->a] = b2Sub( sys->velocity[c->a], f );
-		sys->velocity[c->b] = b2Add( sys->velocity[c->b], f );
+		{ b2Vec2 __v = b2Sub( ( (b2Vec2){ sys->velX[c->a], sys->velY[c->a] } ), f ); sys->velX[c->a] = __v.x; sys->velY[c->a] = __v.y; }
+		{ b2Vec2 __v = b2Add( ( (b2Vec2){ sys->velX[c->b], sys->velY[c->b] } ), f ); sys->velX[c->b] = __v.x; sys->velY[c->b] = __v.y; }
 	}
 }
 
@@ -2444,34 +2462,31 @@ static void LimitVelocity( lfParticleSystem* sys, float dt )
 {
 	float maxSpeed = sys->diameter / dt;
 	float maxSpeedSqr = maxSpeed * maxSpeed;
-	// 2 particles (4 floats) per lane. Both branches (scaled + unscaled) are
-	// computed for every lane - standard SIMD select, not a bug: a stationary
-	// particle (speedSqr=0) produces an Inf `scale` lane via /0, but the
-	// bitwise blend ANDs it against an all-zero mask, so the Inf never reaches
-	// `result` (AND with 0 bits is exactly 0 regardless of the other operand).
-	float* vel = (float*)sys->velocity;
-	int pairCount = sys->count & ~1;
+	float* vx = sys->velX;
+	float* vy = sys->velY;
+	const int n = sys->count;
 	__m128 maxSpeedSqrV = _mm_set1_ps( maxSpeedSqr );
 	__m128 maxSpeedV = _mm_set1_ps( maxSpeed );
-	for ( int i = 0; i < pairCount; i += 2 )
+	int i = 0;
+	for ( ; i + 4 <= n; i += 4 )
 	{
-		__m128 v = _mm_loadu_ps( vel + i * 2 );
-		__m128 sq = _mm_mul_ps( v, v );
-		__m128 swapped = _mm_shuffle_ps( sq, sq, _MM_SHUFFLE( 2, 3, 0, 1 ) );
-		__m128 speedSqr = _mm_add_ps( sq, swapped ); // (s0,s0,s1,s1)
+		__m128 x = _mm_loadu_ps( vx + i );
+		__m128 y = _mm_loadu_ps( vy + i );
+		__m128 speedSqr = _mm_add_ps( _mm_mul_ps( x, x ), _mm_mul_ps( y, y ) );
 		__m128 mask = _mm_cmpgt_ps( speedSqr, maxSpeedSqrV );
+		/* Stationary lanes: Inf scale is AND-masked out (same as old xyxy SIMD). */
 		__m128 scale = _mm_div_ps( maxSpeedV, _mm_sqrt_ps( speedSqr ) );
-		__m128 scaled = _mm_mul_ps( v, scale );
-		__m128 result = _mm_or_ps( _mm_and_ps( mask, scaled ), _mm_andnot_ps( mask, v ) );
-		_mm_storeu_ps( vel + i * 2, result );
+		_mm_storeu_ps( vx + i, _mm_or_ps( _mm_and_ps( mask, _mm_mul_ps( x, scale ) ), _mm_andnot_ps( mask, x ) ) );
+		_mm_storeu_ps( vy + i, _mm_or_ps( _mm_and_ps( mask, _mm_mul_ps( y, scale ) ), _mm_andnot_ps( mask, y ) ) );
 	}
-	// Trailing odd particle (0 or 1) - not worth a second SIMD lane for one element.
-	for ( int i = pairCount; i < sys->count; i++ )
+	for ( ; i < n; i++ )
 	{
-		float speedSqr = b2LengthSquared( sys->velocity[i] );
+		float speedSqr = vx[i] * vx[i] + vy[i] * vy[i];
 		if ( speedSqr > maxSpeedSqr )
 		{
-			sys->velocity[i] = b2MulSV( maxSpeed / sqrtf( speedSqr ), sys->velocity[i] );
+			float s = maxSpeed / sqrtf( speedSqr );
+			vx[i] *= s;
+			vy[i] *= s;
 		}
 	}
 }
@@ -2486,30 +2501,34 @@ static void SolveWall( lfParticleSystem* sys )
 	{
 		if ( sys->flags[i] & lf_wallParticle )
 		{
-			sys->velocity[i] = ( b2Vec2 ){ 0.0f, 0.0f };
+			{ b2Vec2 __v = ( b2Vec2 ){ 0.0f, 0.0f }; sys->velX[i] = __v.x; sys->velY[i] = __v.y; }
 		}
 	}
 }
 
 static void Integrate( lfParticleSystem* sys, float dt )
 {
-	// position[i] += dt * velocity[i]. Both are contiguous b2Vec2 (2 floats),
-	// so a flat float pass over 2*count elements is correct regardless of
-	// which lane is x or y - dt is a uniform scalar multiply either way.
-	float* pos = (float*)sys->position;
-	const float* velConst = (const float*)sys->velocity;
-	int n = sys->count * 2;
+	/* Native SoA: advance each axis buffer independently. */
+	float* px = sys->posX;
+	float* py = sys->posY;
+	const float* vx = sys->velX;
+	const float* vy = sys->velY;
+	const int n = sys->count;
 	__m128 dtv = _mm_set1_ps( dt );
 	int i = 0;
 	for ( ; i + 4 <= n; i += 4 )
 	{
-		__m128 p = _mm_loadu_ps( pos + i );
-		__m128 v = _mm_loadu_ps( velConst + i );
-		_mm_storeu_ps( pos + i, _mm_add_ps( p, _mm_mul_ps( dtv, v ) ) );
+		__m128 p = _mm_loadu_ps( px + i );
+		__m128 v = _mm_loadu_ps( vx + i );
+		_mm_storeu_ps( px + i, _mm_add_ps( p, _mm_mul_ps( dtv, v ) ) );
+		p = _mm_loadu_ps( py + i );
+		v = _mm_loadu_ps( vy + i );
+		_mm_storeu_ps( py + i, _mm_add_ps( p, _mm_mul_ps( dtv, v ) ) );
 	}
 	for ( ; i < n; i++ )
 	{
-		pos[i] += dt * velConst[i];
+		px[i] += dt * vx[i];
+		py[i] += dt * vy[i];
 	}
 }
 
@@ -2540,7 +2559,7 @@ static void SolveForce( lfParticleSystem* sys, float dt )
 	float velocityPerForce = dt * sys->particleInvMass;
 	for ( int i = 0; i < sys->count; i++ )
 	{
-		sys->velocity[i] = b2Add( sys->velocity[i], b2MulSV( velocityPerForce, sys->force[i] ) );
+		{ b2Vec2 __v = b2Add( ( (b2Vec2){ sys->velX[i], sys->velY[i] } ), b2MulSV( velocityPerForce, sys->force[i] ) ); sys->velX[i] = __v.x; sys->velY[i] = __v.y; }
 	}
 	sys->hasForce = false;
 }
@@ -2601,7 +2620,7 @@ void lfParticleSystem_ApplyLinearImpulse( lfParticleSystem* sys, int firstIndex,
 		{
 			continue;
 		}
-		sys->velocity[i] = b2Add( sys->velocity[i], velocityDelta );
+		{ b2Vec2 __v = b2Add( ( (b2Vec2){ sys->velX[i], sys->velY[i] } ), velocityDelta ); sys->velX[i] = __v.x; sys->velY[i] = __v.y; }
 	}
 }
 
@@ -2615,7 +2634,7 @@ void lfParticleSystem_ParticleApplyLinearImpulse( lfParticleSystem* sys, int ind
 	{
 		return;
 	}
-	sys->velocity[index] = b2Add( sys->velocity[index], b2MulSV( sys->particleInvMass, impulse ) );
+	{ b2Vec2 __v = b2Add( ( (b2Vec2){ sys->velX[index], sys->velY[index] } ), b2MulSV( sys->particleInvMass, impulse ) ); sys->velX[index] = __v.x; sys->velY[index] = __v.y; }
 }
 
 void lfParticleSystem_GroupApplyForce( lfParticleSystem* sys, lfParticleGroupId groupId, b2Vec2 force )
@@ -2786,8 +2805,8 @@ void lfParticleSystem_SplitParticleGroup( lfParticleSystem* sys, lfParticleGroup
 			int src = first + i;
 			lfParticleDef def = lfDefaultParticleDef();
 			def.flags = sys->flags[src] & ~lf_zombieParticle;
-			def.position = sys->position[src];
-			def.velocity = sys->velocity[src];
+			def.position = ( (b2Vec2){ sys->posX[src], sys->posY[src] } );
+			def.velocity = ( (b2Vec2){ sys->velX[src], sys->velY[src] } );
 			int dst = lfParticleSystem_CreateParticle( sys, &def );
 			if ( dst < 0 )
 			{
@@ -2958,8 +2977,8 @@ static void SolveSolid( lfParticleSystem* sys, float dt )
 			continue;
 		}
 		b2Vec2 f = b2MulSV( ejectionStrength * h * c->weight, c->normal );
-		sys->velocity[a] = b2Sub( sys->velocity[a], f );
-		sys->velocity[b] = b2Add( sys->velocity[b], f );
+		{ b2Vec2 __v = b2Sub( ( (b2Vec2){ sys->velX[a], sys->velY[a] } ), f ); sys->velX[a] = __v.x; sys->velY[a] = __v.y; }
+		{ b2Vec2 __v = b2Add( ( (b2Vec2){ sys->velX[b], sys->velY[b] } ), f ); sys->velX[b] = __v.x; sys->velY[b] = __v.y; }
 	}
 }
 
@@ -2987,10 +3006,10 @@ static void SolveRigid( lfParticleSystem* sys, float dt )
 		b2Vec2 tp = b2Sub( b2Add( center, b2MulSV( dt, lin ) ), rotatedCenter );
 		for ( int i = group->firstIndex; i < group->lastIndex; i++ )
 		{
-			b2Vec2 p = sys->position[i];
+			b2Vec2 p = ( (b2Vec2){ sys->posX[i], sys->posY[i] } );
 			b2Vec2 rp = RotateOffset( c, s, p );
 			b2Vec2 world = b2Add( tp, rp );
-			sys->velocity[i] = b2MulSV( invDt, b2Sub( world, p ) );
+			{ b2Vec2 __v = b2MulSV( invDt, b2Sub( world, p ) ); sys->velX[i] = __v.x; sys->velY[i] = __v.y; }
 		}
 	}
 }
@@ -3027,7 +3046,7 @@ int lfParticleSystem_QueryAABB( lfParticleSystem* sys, b2AABB aabb, int* outIndi
 				{
 					continue;
 				}
-				b2Vec2 p = sys->position[j];
+				b2Vec2 p = ( (b2Vec2){ sys->posX[j], sys->posY[j] } );
 				if ( p.x + r < aabb.lowerBound.x || p.x - r > aabb.upperBound.x || p.y + r < aabb.lowerBound.y ||
 					 p.y - r > aabb.upperBound.y )
 				{
@@ -3088,7 +3107,7 @@ int lfParticleSystem_RayCast( lfParticleSystem* sys, b2Vec2 point1, b2Vec2 point
 				{
 					continue;
 				}
-				b2Vec2 p = b2Sub( point1, sys->position[j] );
+				b2Vec2 p = b2Sub( point1, ( (b2Vec2){ sys->posX[j], sys->posY[j] } ) );
 				float p2 = b2LengthSquared( p );
 				if ( p2 <= squaredDiameter )
 				{
@@ -3218,14 +3237,24 @@ float lfParticleSystem_GetRadius( const lfParticleSystem* sys )
 	return sys->def.radius;
 }
 
-const b2Vec2* lfParticleSystem_GetPositionBuffer( const lfParticleSystem* sys )
+const float* lfParticleSystem_GetPositionXBuffer( const lfParticleSystem* sys )
 {
-	return sys->position;
+	return sys != NULL ? sys->posX : NULL;
 }
 
-const b2Vec2* lfParticleSystem_GetVelocityBuffer( const lfParticleSystem* sys )
+const float* lfParticleSystem_GetPositionYBuffer( const lfParticleSystem* sys )
 {
-	return sys->velocity;
+	return sys != NULL ? sys->posY : NULL;
+}
+
+const float* lfParticleSystem_GetVelocityXBuffer( const lfParticleSystem* sys )
+{
+	return sys != NULL ? sys->velX : NULL;
+}
+
+const float* lfParticleSystem_GetVelocityYBuffer( const lfParticleSystem* sys )
+{
+	return sys != NULL ? sys->velY : NULL;
 }
 
 const uint32_t* lfParticleSystem_GetFlagsBuffer( const lfParticleSystem* sys )

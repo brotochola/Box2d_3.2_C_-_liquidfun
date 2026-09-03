@@ -124,15 +124,6 @@ static lfParticleSystem* g_particles = NULL;
 static int32_t g_particle_count_value = 0;
 static int g_particle_capacity = 0;
 static int g_particle_sub_steps = 2;
-/* Deinterleaved copy of the particle position buffer (liquidfun-c stores
- * b2Vec2 x,y,x,y,... contiguously). Filled once per step_world from a tight C
- * loop so weedjs_post.js can do two bulk TypedArray .set() calls instead of a
- * scalar per-particle loop reading interleaved floats out of Module.HEAPF32. */
-static float* g_particle_x = NULL;
-static float* g_particle_y = NULL;
-/* lfParticleSystem_GetAlphaBuffer, copied out the same way - fade-to-0 only
- * when lfParticleGroupDef.fadeToAlpha0 was set; otherwise always 1.0. */
-static float* g_particle_alpha = NULL;
 static float g_liquidfun_step_ms = 0.0f;
 
 enum EventHeaderIndex
@@ -2060,20 +2051,6 @@ void step_world( uint32_t worldPacked, float timeStep, int subStepCount )
 		double t0 = emscripten_get_now();
 		lfParticleSystem_Step( g_particles, timeStep, g_particle_sub_steps );
 		g_particle_count_value = lfParticleSystem_GetParticleCount( g_particles );
-		if ( g_particle_x != NULL && g_particle_y != NULL )
-		{
-			const b2Vec2* pos = lfParticleSystem_GetPositionBuffer( g_particles );
-			const float* alpha = g_particle_alpha != NULL ? lfParticleSystem_GetAlphaBuffer( g_particles ) : NULL;
-			for ( int32_t i = 0; i < g_particle_count_value; i++ )
-			{
-				g_particle_x[i] = pos[i].x;
-				g_particle_y[i] = pos[i].y;
-				if ( alpha != NULL )
-				{
-					g_particle_alpha[i] = alpha[i];
-				}
-			}
-		}
 		g_liquidfun_step_ms = (float)( emscripten_get_now() - t0 );
 	}
 	export_contact_events( worldId );
@@ -2363,12 +2340,6 @@ int create_particle_system( uint32_t worldPacked, float radius, float density, i
 		g_particle_capacity = 0;
 		g_particle_count_value = 0;
 	}
-	free( g_particle_x );
-	free( g_particle_y );
-	g_particle_x = NULL;
-	g_particle_y = NULL;
-	free( g_particle_alpha );
-	g_particle_alpha = NULL;
 	if ( maxParticles <= 0 || maxParticles > MAX_PARTICLES )
 	{
 		return 0;
@@ -2386,9 +2357,6 @@ int create_particle_system( uint32_t worldPacked, float radius, float density, i
 	}
 	g_particle_capacity = lfParticleSystem_GetCapacity( g_particles );
 	g_particle_count_value = lfParticleSystem_GetParticleCount( g_particles );
-	g_particle_x = (float*)malloc( (size_t)g_particle_capacity * sizeof( float ) );
-	g_particle_y = (float*)malloc( (size_t)g_particle_capacity * sizeof( float ) );
-	g_particle_alpha = (float*)malloc( (size_t)g_particle_capacity * sizeof( float ) );
 	return 1;
 }
 
@@ -2402,12 +2370,6 @@ void destroy_particle_system( void )
 	}
 	g_particle_capacity = 0;
 	g_particle_count_value = 0;
-	free( g_particle_x );
-	free( g_particle_y );
-	g_particle_x = NULL;
-	g_particle_y = NULL;
-	free( g_particle_alpha );
-	g_particle_alpha = NULL;
 	g_liquidfun_step_ms = 0.0f;
 }
 
@@ -2751,20 +2713,6 @@ int restore_particles( int count, const float* posXY, const float* velXY, const 
 		}
 	}
 	g_particle_count_value = lfParticleSystem_GetParticleCount( g_particles );
-	if ( g_particle_x != NULL && g_particle_y != NULL )
-	{
-		const b2Vec2* pos = lfParticleSystem_GetPositionBuffer( g_particles );
-		const float* alpha = g_particle_alpha != NULL ? lfParticleSystem_GetAlphaBuffer( g_particles ) : NULL;
-		for ( int32_t i = 0; i < g_particle_count_value; i++ )
-		{
-			g_particle_x[i] = pos[i].x;
-			g_particle_y[i] = pos[i].y;
-			if ( alpha != NULL && g_particle_alpha != NULL )
-			{
-				g_particle_alpha[i] = alpha[i];
-			}
-		}
-	}
 	return g_particle_count_value;
 }
 
@@ -2869,23 +2817,14 @@ int get_particle_count_byte_offset( void )
 EMSCRIPTEN_KEEPALIVE
 int get_particle_pos_byte_offset( void )
 {
-	if ( g_particles == NULL )
-	{
-		return 0;
-	}
-	const b2Vec2* pos = lfParticleSystem_GetPositionBuffer( g_particles );
-	return pos == NULL ? 0 : (int)( (uintptr_t)pos );
+	/* Interleaved b2Vec2 layout is gone. Use get_particle_x/y_byte_offset. */
+	return 0;
 }
 
 EMSCRIPTEN_KEEPALIVE
 int get_particle_vel_byte_offset( void )
 {
-	if ( g_particles == NULL )
-	{
-		return 0;
-	}
-	const b2Vec2* vel = lfParticleSystem_GetVelocityBuffer( g_particles );
-	return vel == NULL ? 0 : (int)( (uintptr_t)vel );
+	return 0;
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -2902,19 +2841,56 @@ int get_particle_flags_byte_offset( void )
 EMSCRIPTEN_KEEPALIVE
 int get_particle_x_byte_offset( void )
 {
-	return g_particle_x == NULL ? 0 : (int)( (uintptr_t)g_particle_x );
+	if ( g_particles == NULL )
+	{
+		return 0;
+	}
+	const float* x = lfParticleSystem_GetPositionXBuffer( g_particles );
+	return x == NULL ? 0 : (int)( (uintptr_t)x );
 }
 
 EMSCRIPTEN_KEEPALIVE
 int get_particle_alpha_byte_offset( void )
 {
-	return g_particle_alpha == NULL ? 0 : (int)( (uintptr_t)g_particle_alpha );
+	if ( g_particles == NULL )
+	{
+		return 0;
+	}
+	const float* a = lfParticleSystem_GetAlphaBuffer( g_particles );
+	return a == NULL ? 0 : (int)( (uintptr_t)a );
 }
 
 EMSCRIPTEN_KEEPALIVE
 int get_particle_y_byte_offset( void )
 {
-	return g_particle_y == NULL ? 0 : (int)( (uintptr_t)g_particle_y );
+	if ( g_particles == NULL )
+	{
+		return 0;
+	}
+	const float* y = lfParticleSystem_GetPositionYBuffer( g_particles );
+	return y == NULL ? 0 : (int)( (uintptr_t)y );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_particle_vx_byte_offset( void )
+{
+	if ( g_particles == NULL )
+	{
+		return 0;
+	}
+	const float* vx = lfParticleSystem_GetVelocityXBuffer( g_particles );
+	return vx == NULL ? 0 : (int)( (uintptr_t)vx );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_particle_vy_byte_offset( void )
+{
+	if ( g_particles == NULL )
+	{
+		return 0;
+	}
+	const float* vy = lfParticleSystem_GetVelocityYBuffer( g_particles );
+	return vy == NULL ? 0 : (int)( (uintptr_t)vy );
 }
 
 

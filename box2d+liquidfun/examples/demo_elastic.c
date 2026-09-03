@@ -36,10 +36,11 @@ static void DumpFrame( int frameIndex, lfParticleSystem* ps, lfParticleGroupId g
 	fprintf( f, "group,%f,%f,%f\n", com.x, com.y, angle );
 
 	int count = lfParticleSystem_GetParticleCount( ps );
-	const b2Vec2* pos = lfParticleSystem_GetPositionBuffer( ps );
+	const float* posX = lfParticleSystem_GetPositionXBuffer( ps );
+	const float* posY = lfParticleSystem_GetPositionYBuffer( ps );
 	for ( int i = 0; i < count; i++ )
 	{
-		fprintf( f, "p,%f,%f\n", pos[i].x, pos[i].y );
+		fprintf( f, "p,%f,%f\n", posX[i], posY[i] );
 	}
 	fclose( f );
 }
