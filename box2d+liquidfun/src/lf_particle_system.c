@@ -9,6 +9,8 @@
 #include "liquidfun/lf_particle_system.h"
 
 #include "box2d/constants.h"
+#include "physics_world.h"
+#include "scheduler.h"
 
 #include <float.h>
 #include <math.h>
@@ -21,6 +23,12 @@
 // translated to real wasm128 instructions - same technique Box2D 3's own
 // contact_solver.c uses for B2_SIMD_SSE2 on B2_CPU_WASM). Fail the build
 // loudly instead of silently going scalar if that flag is ever missing.
+#if defined( _MSC_VER ) && !defined( __clang__ )
+#include <intrin.h>
+#if !defined( __SSE2__ )
+#define __SSE2__ 1
+#endif
+#endif
 #if !defined( __SSE2__ )
 #error "liquidfun-c requires SSE2 (-msimd128 -msse2). Check wasm/CMakeLists.txt compile flags."
 #endif
@@ -69,6 +77,26 @@ void lfSetTaskSystem( b2EnqueueTaskCallback* enqueue, b2FinishTaskCallback* fini
 int lfGetWorkerCount( void )
 {
 	return g_lfWorkerCount;
+}
+
+static void lfResetBox2dScheduler( void* user )
+{
+	if ( user != NULL )
+	{
+		b2ResetScheduler( (b2Scheduler*)user );
+	}
+}
+
+void lfBindBox2dWorld( b2WorldId worldId )
+{
+	b2World* world = b2GetWorldFromId( worldId );
+	if ( world == NULL )
+	{
+		lfSetTaskSystem( NULL, NULL, NULL, 1, NULL );
+		return;
+	}
+	lfSetTaskSystem( world->enqueueTaskFcn, world->finishTaskFcn, world->userTaskContext, world->workerCount,
+					 world->scheduler != NULL ? lfResetBox2dScheduler : NULL );
 }
 
 typedef struct lfParallelForShared
@@ -130,11 +158,6 @@ static void lfParallelFor( lfParallelForCallback* callback, int itemCount, int m
 	{
 		callback( 0, itemCount, 0, context );
 		return;
-	}
-
-	if ( g_lfResetTasks != NULL )
-	{
-		g_lfResetTasks( g_lfTaskUser );
 	}
 
 	int blocksPerWorker = 4;
@@ -1654,8 +1677,12 @@ static void BuildGrid( lfParticleSystem* sys )
 
 #define LF_CONTACT_PARALLEL_MIN 4096
 #define LF_CONTACT_MIN_RANGE 256
-#define LF_PARTICLE_LOOP_MIN 4096
-#define LF_PARTICLE_LOOP_MIN_RANGE 256
+
+static float lfInvSqrt( float x )
+{
+	float inv = _mm_cvtss_f32( _mm_rsqrt_ss( _mm_set_ss( x ) ) );
+	return inv * ( 1.5f - 0.5f * x * inv * inv );
+}
 
 static void GrowParticleContactCap( lfParticleSystem* sys, int need )
 {
@@ -1730,7 +1757,7 @@ static void FindContactsRange( int start, int end, int workerIndex, void* contex
 					float distSqr = ddx * ddx + ddy * ddy;
 					if ( distSqr < squaredDiameter && distSqr > 1e-9f )
 					{
-						float invD = 1.0f / sqrtf( distSqr );
+						float invD = lfInvSqrt( distSqr );
 						b2Vec2 normal = { ddx * invD, ddy * invD };
 						float weight = 1.0f - distSqr * invD * invDiameter;
 						PushContactBucket( sys, workerIndex, i, (int)j, normal, weight );
@@ -1793,7 +1820,7 @@ static void FindParticleContacts( lfParticleSystem* sys )
 						float distSqr = ddx * ddx + ddy * ddy;
 						if ( distSqr < squaredDiameter && distSqr > 1e-9f )
 						{
-							float invD = 1.0f / sqrtf( distSqr );
+							float invD = lfInvSqrt( distSqr );
 							b2Vec2 normal = { ddx * invD, ddy * invD };
 							float weight = 1.0f - distSqr * invD * invDiameter;
 							PushParticleContact( sys, i, j, normal, weight );
@@ -2512,11 +2539,6 @@ typedef struct lfRangeJob
 	float ay;
 } lfRangeJob;
 
-static int lfShouldParallelParticles( int n )
-{
-	return n >= LF_PARTICLE_LOOP_MIN && g_lfWorkerCount > 1 && g_lfEnqueue != NULL;
-}
-
 static void GravityRange( int start, int end, int workerIndex, void* context )
 {
 	(void)workerIndex;
@@ -2553,11 +2575,6 @@ static void SolveGravity( lfParticleSystem* sys, float dt )
 	b2Vec2 gravity = b2World_GetGravity( sys->worldId );
 	b2Vec2 dv = b2MulSV( dt, gravity );
 	lfRangeJob job = { sys, dt, dv.x, dv.y };
-	if ( lfShouldParallelParticles( sys->count ) )
-	{
-		lfParallelFor( &GravityRange, sys->count, LF_PARTICLE_LOOP_MIN_RANGE, &job );
-		return;
-	}
 	GravityRange( 0, sys->count, 0, &job );
 }
 
@@ -2613,11 +2630,6 @@ static void LimitVelocity( lfParticleSystem* sys, float dt )
 {
 	float maxSpeed = sys->diameter / dt;
 	lfRangeJob job = { sys, dt, maxSpeed, maxSpeed * maxSpeed };
-	if ( lfShouldParallelParticles( sys->count ) )
-	{
-		lfParallelFor( &LimitVelocityRange, sys->count, LF_PARTICLE_LOOP_MIN_RANGE, &job );
-		return;
-	}
 	LimitVelocityRange( 0, sys->count, 0, &job );
 }
 
@@ -2642,11 +2654,6 @@ static void SolveWall( lfParticleSystem* sys )
 {
 	if ( ( sys->flagOr & lf_wallParticle ) == 0 )
 	{
-		return;
-	}
-	if ( lfShouldParallelParticles( sys->count ) )
-	{
-		lfParallelFor( &WallRange, sys->count, LF_PARTICLE_LOOP_MIN_RANGE, sys );
 		return;
 	}
 	WallRange( 0, sys->count, 0, sys );
@@ -2692,11 +2699,6 @@ static void IntegrateRange( int start, int end, int workerIndex, void* context )
 static void Integrate( lfParticleSystem* sys, float dt )
 {
 	lfRangeJob job = { sys, dt, 0.0f, 0.0f };
-	if ( lfShouldParallelParticles( sys->count ) )
-	{
-		lfParallelFor( &IntegrateRange, sys->count, LF_PARTICLE_LOOP_MIN_RANGE, &job );
-		return;
-	}
 	IntegrateRange( 0, sys->count, 0, &job );
 }
 
@@ -3530,6 +3532,11 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 	if ( sys->count == 0 )
 	{
 		return;
+	}
+
+	if ( g_lfResetTasks != NULL )
+	{
+		g_lfResetTasks( g_lfTaskUser );
 	}
 
 	float subDt = dt / (float)subStepCount;

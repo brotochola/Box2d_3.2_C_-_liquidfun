@@ -27,6 +27,7 @@ add_executable(box2d_wasm
 )
 target_include_directories(box2d_wasm PRIVATE
 	${CMAKE_CURRENT_SOURCE_DIR}/../box2d+liquidfun/include
+	${CMAKE_CURRENT_SOURCE_DIR}/../box2d/src
 )
 target_link_libraries(box2d_wasm PRIVATE box2d)
 

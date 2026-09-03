@@ -239,6 +239,8 @@ B2_API void lfParticleSystem_Step( lfParticleSystem* system, float dt, int subSt
 B2_API void lfSetTaskSystem( b2EnqueueTaskCallback* enqueue, b2FinishTaskCallback* finish, void* userContext,
 							 int workerCount, void ( *resetTasks )( void* userContext ) );
 B2_API int lfGetWorkerCount( void );
+// Wire LF parallel-for to this world's Box2D scheduler (built-in or custom).
+B2_API void lfBindBox2dWorld( b2WorldId worldId );
 
 // ----------------------------------------------------------------------
 // Accessors (read-only views into the internal SoA buffers).

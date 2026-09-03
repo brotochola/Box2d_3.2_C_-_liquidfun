@@ -19,10 +19,11 @@ add_library(liquidfun-c STATIC
 	src/lf_particle_system.c
 )
 target_include_directories(liquidfun-c PUBLIC include)
+target_include_directories(liquidfun-c PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../box2d/src)
 target_link_libraries(liquidfun-c PUBLIC box2d)
 
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-	target_compile_options(liquidfun-c PRIVATE -Wall -Wextra)
+	target_compile_options(liquidfun-c PRIVATE -Wall -Wextra -msse2)
 endif()
 
 option(LIQUIDFUN_C_BUILD_EXAMPLES "Build the liquidfun-c example programs" ON)
@@ -33,8 +34,12 @@ if(LIQUIDFUN_C_BUILD_EXAMPLES)
 	add_executable(demo_elastic examples/demo_elastic.c)
 	target_link_libraries(demo_elastic PRIVATE liquidfun-c)
 
+	add_executable(demo_parallel examples/demo_parallel.c)
+	target_link_libraries(demo_parallel PRIVATE liquidfun-c)
+
 	if(EMSCRIPTEN)
 		target_link_options(demo_water PRIVATE -sNODERAWFS=1)
 		target_link_options(demo_elastic PRIVATE -sNODERAWFS=1)
+		target_link_options(demo_parallel PRIVATE -sNODERAWFS=1 -pthread -sPTHREAD_POOL_SIZE=2)
 	endif()
 endif()

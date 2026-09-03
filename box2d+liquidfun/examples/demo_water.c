@@ -52,6 +52,7 @@ int main( void )
 	b2WorldDef worldDef = b2DefaultWorldDef();
 	worldDef.gravity = ( b2Vec2 ){ 0.0f, -10.0f };
 	b2WorldId worldId = b2CreateWorld( &worldDef );
+	lfBindBox2dWorld( worldId );
 
 	{
 		b2BodyDef groundDef = b2DefaultBodyDef();
