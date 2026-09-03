@@ -2787,85 +2787,6 @@ void cull_particles_outside_bounds( float xMin, float yMin, float xMax, float yM
 	}
 }
 
-static float g_lf_xy_scratch[MAX_PARTICLES * 2];
-
-static void lf_interleave_xy( const float* xs, const float* ys, float* out, int n )
-{
-	int i = 0;
-#if defined( LF_WASM_SSE2 )
-	for ( ; i + 4 <= n; i += 4 )
-	{
-		__m128 vx = _mm_loadu_ps( xs + i );
-		__m128 vy = _mm_loadu_ps( ys + i );
-		_mm_storeu_ps( out + i * 2, _mm_unpacklo_ps( vx, vy ) );
-		_mm_storeu_ps( out + i * 2 + 4, _mm_unpackhi_ps( vx, vy ) );
-	}
-#endif
-	for ( ; i < n; i++ )
-	{
-		out[i * 2] = xs[i];
-		out[i * 2 + 1] = ys[i];
-	}
-}
-
-EMSCRIPTEN_KEEPALIVE
-int get_particle_xy_scratch_byte_offset( void )
-{
-	return (int)( (uintptr_t)g_lf_xy_scratch );
-}
-
-EMSCRIPTEN_KEEPALIVE
-int copy_particle_pos_xy_interleaved( void )
-{
-	if ( g_particles == NULL )
-	{
-		return 0;
-	}
-	int n = g_particle_count_value;
-	if ( n > MAX_PARTICLES )
-	{
-		n = MAX_PARTICLES;
-	}
-	if ( n <= 0 )
-	{
-		return 0;
-	}
-	const float* xs = lfParticleSystem_GetPositionXBuffer( g_particles );
-	const float* ys = lfParticleSystem_GetPositionYBuffer( g_particles );
-	if ( xs == NULL || ys == NULL )
-	{
-		return 0;
-	}
-	lf_interleave_xy( xs, ys, g_lf_xy_scratch, n );
-	return n;
-}
-
-EMSCRIPTEN_KEEPALIVE
-int copy_particle_vel_xy_interleaved( void )
-{
-	if ( g_particles == NULL )
-	{
-		return 0;
-	}
-	int n = g_particle_count_value;
-	if ( n > MAX_PARTICLES )
-	{
-		n = MAX_PARTICLES;
-	}
-	if ( n <= 0 )
-	{
-		return 0;
-	}
-	const float* vx = lfParticleSystem_GetVelocityXBuffer( g_particles );
-	const float* vy = lfParticleSystem_GetVelocityYBuffer( g_particles );
-	if ( vx == NULL || vy == NULL )
-	{
-		return 0;
-	}
-	lf_interleave_xy( vx, vy, g_lf_xy_scratch, n );
-	return n;
-}
-
 EMSCRIPTEN_KEEPALIVE
 int get_particle_weight_byte_offset( void )
 {
@@ -2878,7 +2799,8 @@ int get_particle_weight_byte_offset( void )
 }
 
 EMSCRIPTEN_KEEPALIVE
-int restore_particles( int count, const float* posXY, const float* velXY, const uint32_t* flags )
+int restore_particles( int count, const float* x, const float* y, const float* vx, const float* vy,
+					   const uint32_t* flags )
 {
 	if ( g_particles == NULL )
 	{
@@ -2892,8 +2814,8 @@ int restore_particles( int count, const float* posXY, const float* velXY, const 
 	for ( int i = 0; i < count; i++ )
 	{
 		lfParticleDef def = lfDefaultParticleDef();
-		def.position = ( b2Vec2 ){ posXY[i * 2], posXY[i * 2 + 1] };
-		def.velocity = ( b2Vec2 ){ velXY[i * 2], velXY[i * 2 + 1] };
+		def.position = ( b2Vec2 ){ x[i], y[i] };
+		def.velocity = ( b2Vec2 ){ vx[i], vy[i] };
 		def.flags = flags[i];
 		if ( lfParticleSystem_CreateParticle( g_particles, &def ) < 0 )
 		{
