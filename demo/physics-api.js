@@ -395,6 +395,7 @@ function createPhysicsApi(Module) {
   const getParticleVyByteOffset = wrap("get_particle_vy_byte_offset", "number", []);
   const getParticleAlphaByteOffset = wrap("get_particle_alpha_byte_offset", "number", []);
   const getLiquidFunStepMs = wrap("get_liquidfun_step_ms", "number", []);
+  const getLfWorkerCount = wrap("get_lf_worker_count", "number", []);
 
   const getStateByteOffset = wrap("get_state_byte_offset", "number", []);
   const getSleepingByteOffset = wrap("get_sleeping_byte_offset", "number", []);
@@ -724,7 +725,7 @@ function createPhysicsApi(Module) {
         o.contactDampingRatio ?? 10,
         o.contactSpeed ?? 3,
         o.maximumLinearSpeed ?? 400,
-        o.box2dWorkerCount ?? 4,
+        o.box2dWorkerCount ?? 2,
       );
       this._buffersBound = false;
     }
@@ -1330,6 +1331,10 @@ function createPhysicsApi(Module) {
       return getLiquidFunStepMs();
     }
 
+    getLfWorkerCount() {
+      return getLfWorkerCount();
+    }
+
     getSharedBuffer() {
       return Module.HEAPF32.buffer;
     }
@@ -1398,6 +1403,7 @@ function createPhysicsApi(Module) {
         particleVxByteOffset: getParticleVxByteOffset(),
         particleVyByteOffset: getParticleVyByteOffset(),
         particleAlphaByteOffset: getParticleAlphaByteOffset(),
+        lfWorkerCount: getLfWorkerCount(),
       };
 
     }

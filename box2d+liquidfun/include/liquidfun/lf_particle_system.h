@@ -232,6 +232,14 @@ B2_API void lfParticleSystem_SetTuning( lfParticleSystem* system, float dampingS
 // try 1-4.
 B2_API void lfParticleSystem_Step( lfParticleSystem* system, float dt, int subStepCount );
 
+// Optional: share Box2D's task callbacks so LF parallel-for uses the same worker
+// threads. Call after b2CreateWorld (and after b2World_SetWorkerCount).
+// resetTasks may be NULL; if set, it is invoked at the start of each LF parallel-for
+// (Box2D built-in scheduler: pass a wrapper around b2ResetScheduler).
+B2_API void lfSetTaskSystem( b2EnqueueTaskCallback* enqueue, b2FinishTaskCallback* finish, void* userContext,
+							 int workerCount, void ( *resetTasks )( void* userContext ) );
+B2_API int lfGetWorkerCount( void );
+
 // ----------------------------------------------------------------------
 // Accessors (read-only views into the internal SoA buffers).
 // If the system was created with growable=false, these pointers are stable

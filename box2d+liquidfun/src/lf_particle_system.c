@@ -12,6 +12,7 @@
 
 #include <float.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,6 +35,153 @@
 // Google b2_barrierCollisionTime. tmax = this * dt.
 #define LF_BARRIER_COLLISION_TIME 2.5f
 #define LF_PAIR_CAPTURE_FLAGS ( lf_springParticle | lf_barrierParticle )
+
+// ------------------------------------------------------------------------
+// Shared Box2D task system (same pthreads as b2World_Step)
+// ------------------------------------------------------------------------
+
+typedef void lfParallelForCallback( int startIndex, int endIndex, int workerIndex, void* context );
+
+static b2EnqueueTaskCallback* g_lfEnqueue = NULL;
+static b2FinishTaskCallback* g_lfFinish = NULL;
+static void* g_lfTaskUser = NULL;
+static void ( *g_lfResetTasks )( void* userContext ) = NULL;
+static int g_lfWorkerCount = 1;
+
+void lfSetTaskSystem( b2EnqueueTaskCallback* enqueue, b2FinishTaskCallback* finish, void* userContext, int workerCount,
+					  void ( *resetTasks )( void* userContext ) )
+{
+	g_lfEnqueue = enqueue;
+	g_lfFinish = finish;
+	g_lfTaskUser = userContext;
+	g_lfResetTasks = resetTasks;
+	if ( workerCount < 1 )
+	{
+		workerCount = 1;
+	}
+	if ( workerCount > B2_MAX_WORKERS )
+	{
+		workerCount = B2_MAX_WORKERS;
+	}
+	g_lfWorkerCount = workerCount;
+}
+
+int lfGetWorkerCount( void )
+{
+	return g_lfWorkerCount;
+}
+
+typedef struct lfParallelForShared
+{
+	atomic_int nextBlock;
+	int blockCount;
+	int blockSize;
+	int itemCount;
+	lfParallelForCallback* callback;
+	void* context;
+} lfParallelForShared;
+
+typedef struct lfParallelForTask
+{
+	lfParallelForShared* shared;
+	int workerIndex;
+} lfParallelForTask;
+
+static void lfParallelForTrampoline( void* taskContext )
+{
+	lfParallelForTask* task = (lfParallelForTask*)taskContext;
+	lfParallelForShared* shared = task->shared;
+	const int workerIndex = task->workerIndex;
+	const int blockCount = shared->blockCount;
+	const int blockSize = shared->blockSize;
+	const int itemCount = shared->itemCount;
+	lfParallelForCallback* callback = shared->callback;
+	void* context = shared->context;
+
+	for ( ;; )
+	{
+		int blockIndex = atomic_fetch_add( &shared->nextBlock, 1 );
+		if ( blockIndex >= blockCount )
+		{
+			break;
+		}
+		int start = blockIndex * blockSize;
+		int end = start + blockSize;
+		if ( end > itemCount )
+		{
+			end = itemCount;
+		}
+		callback( start, end, workerIndex, context );
+	}
+}
+
+static void lfParallelFor( lfParallelForCallback* callback, int itemCount, int minRange, void* context )
+{
+	if ( itemCount <= 0 )
+	{
+		return;
+	}
+	if ( minRange < 1 )
+	{
+		minRange = 1;
+	}
+	const int workerCount = g_lfWorkerCount;
+	if ( workerCount <= 1 || g_lfEnqueue == NULL || g_lfFinish == NULL )
+	{
+		callback( 0, itemCount, 0, context );
+		return;
+	}
+
+	if ( g_lfResetTasks != NULL )
+	{
+		g_lfResetTasks( g_lfTaskUser );
+	}
+
+	int blocksPerWorker = 4;
+	int maxBlockCount = blocksPerWorker * workerCount;
+	int blockSize;
+	int blockCount;
+	if ( itemCount <= minRange * maxBlockCount )
+	{
+		blockSize = minRange;
+		blockCount = ( itemCount + blockSize - 1 ) / blockSize;
+	}
+	else
+	{
+		blockSize = ( itemCount + maxBlockCount - 1 ) / maxBlockCount;
+		blockCount = ( itemCount + blockSize - 1 ) / blockSize;
+	}
+	if ( blockCount < 1 )
+	{
+		blockCount = 1;
+	}
+
+	int taskCount = workerCount < blockCount ? workerCount : blockCount;
+
+	lfParallelForShared shared;
+	shared.blockCount = blockCount;
+	shared.blockSize = blockSize;
+	shared.itemCount = itemCount;
+	shared.callback = callback;
+	shared.context = context;
+	atomic_store( &shared.nextBlock, 0 );
+
+	lfParallelForTask tasks[B2_MAX_WORKERS];
+	void* handles[B2_MAX_WORKERS];
+	for ( int i = 0; i < taskCount; ++i )
+	{
+		tasks[i].shared = &shared;
+		tasks[i].workerIndex = i;
+		handles[i] = g_lfEnqueue( &lfParallelForTrampoline, &tasks[i], g_lfTaskUser );
+	}
+	for ( int i = 0; i < taskCount; ++i )
+	{
+		if ( handles[i] != NULL )
+		{
+			g_lfFinish( handles[i], g_lfTaskUser );
+		}
+	}
+}
 
 // ------------------------------------------------------------------------
 // Internal types
@@ -154,6 +302,10 @@ struct lfParticleSystem
 	lfParticleContact* particleContacts;
 	int particleContactCount;
 	int particleContactCapacity;
+	// Per-worker scratch for parallel FindParticleContacts. Merge is serial.
+	lfParticleContact* contactBucket[B2_MAX_WORKERS];
+	int contactBucketCount[B2_MAX_WORKERS];
+	int contactBucketCap[B2_MAX_WORKERS];
 	// SolveStaticPressure scratch: indices into particleContacts that qualify
 	// (either endpoint flagged lf_staticPressureParticle), compacted once per
 	// sub-step instead of re-filtering the full list every Poisson iteration.
@@ -536,6 +688,10 @@ void lfParticleSystem_Destroy( lfParticleSystem* sys )
 	free( sys->particleContacts );
 	free( sys->staticPressureContactIndices );
 	free( sys->bodyContacts );
+	for ( int w = 0; w < B2_MAX_WORKERS; w++ )
+	{
+		free( sys->contactBucket[w] );
+	}
 	free( sys->queryShapes );
 	free( sys->pairs );
 	free( sys );
@@ -1496,16 +1652,29 @@ static void BuildGrid( lfParticleSystem* sys )
 	}
 }
 
+#define LF_CONTACT_PARALLEL_MIN 4096
+#define LF_CONTACT_MIN_RANGE 256
+
+static void GrowParticleContactCap( lfParticleSystem* sys, int need )
+{
+	if ( need <= sys->particleContactCapacity )
+	{
+		return;
+	}
+	int cap = sys->particleContactCapacity < 1024 ? 1024 : sys->particleContactCapacity;
+	while ( cap < need )
+	{
+		cap *= 2;
+	}
+	sys->particleContacts =
+		(lfParticleContact*)realloc( sys->particleContacts, (size_t)cap * sizeof( lfParticleContact ) );
+	sys->staticPressureContactIndices = (int*)realloc( sys->staticPressureContactIndices, (size_t)cap * sizeof( int ) );
+	sys->particleContactCapacity = cap;
+}
+
 static void PushParticleContact( lfParticleSystem* sys, int a, int b, b2Vec2 normal, float weight )
 {
-	if ( sys->particleContactCount == sys->particleContactCapacity )
-	{
-		sys->particleContactCapacity *= 2;
-		sys->particleContacts =
-			(lfParticleContact*)realloc( sys->particleContacts, (size_t)sys->particleContactCapacity * sizeof( lfParticleContact ) );
-		sys->staticPressureContactIndices =
-			(int*)realloc( sys->staticPressureContactIndices, (size_t)sys->particleContactCapacity * sizeof( int ) );
-	}
+	GrowParticleContactCap( sys, sys->particleContactCount + 1 );
 	lfParticleContact* c = &sys->particleContacts[sys->particleContactCount++];
 	c->a = (uint16_t)a;
 	c->b = (uint16_t)b;
@@ -1513,17 +1682,36 @@ static void PushParticleContact( lfParticleSystem* sys, int a, int b, b2Vec2 nor
 	c->weight = weight;
 }
 
-static void FindParticleContacts( lfParticleSystem* sys )
+static void PushContactBucket( lfParticleSystem* sys, int workerIndex, int a, int b, b2Vec2 normal, float weight )
 {
-	sys->particleContactCount = 0;
+	int* count = &sys->contactBucketCount[workerIndex];
+	int* cap = &sys->contactBucketCap[workerIndex];
+	if ( *count == *cap )
+	{
+		int next = *cap < 256 ? 256 : *cap * 2;
+		sys->contactBucket[workerIndex] =
+			(lfParticleContact*)realloc( sys->contactBucket[workerIndex], (size_t)next * sizeof( lfParticleContact ) );
+		*cap = next;
+	}
+	lfParticleContact* c = &sys->contactBucket[workerIndex][( *count )++];
+	c->a = (uint16_t)a;
+	c->b = (uint16_t)b;
+	c->normal = normal;
+	c->weight = weight;
+}
+
+static void FindContactsRange( int start, int end, int workerIndex, void* context )
+{
+	lfParticleSystem* sys = (lfParticleSystem*)context;
 	const float squaredDiameter = sys->diameter * sys->diameter;
 	const float invDiameter = sys->invDiameter;
+	const float* posX = sys->posX;
+	const float* posY = sys->posY;
 
-	for ( int i = 0; i < sys->count; i++ )
+	for ( int i = start; i < end; i++ )
 	{
 		int ix = sys->cellX[i];
 		int iy = sys->cellY[i];
-
 		for ( int dy = -1; dy <= 1; dy++ )
 		{
 			for ( int dx = -1; dx <= 1; dx++ )
@@ -1533,21 +1721,95 @@ static void FindParticleContacts( lfParticleSystem* sys )
 				{
 					if ( (int)j <= i )
 					{
-						continue; // each unordered pair is only added once, from the lower index
+						continue;
 					}
-					b2Vec2 delta = b2Sub( ( (b2Vec2){ sys->posX[j], sys->posY[j] } ), ( (b2Vec2){ sys->posX[i], sys->posY[i] } ) );
-					float distSqr = b2LengthSquared( delta );
+					float ddx = posX[j] - posX[i];
+					float ddy = posY[j] - posY[i];
+					float distSqr = ddx * ddx + ddy * ddy;
 					if ( distSqr < squaredDiameter && distSqr > 1e-9f )
 					{
 						float invD = 1.0f / sqrtf( distSqr );
-						b2Vec2 normal = b2MulSV( invD, delta );
+						b2Vec2 normal = { ddx * invD, ddy * invD };
 						float weight = 1.0f - distSqr * invD * invDiameter;
-						PushParticleContact( sys, i, j, normal, weight );
+						PushContactBucket( sys, workerIndex, i, (int)j, normal, weight );
 					}
 				}
 			}
 		}
 	}
+}
+
+static void MergeContactBuckets( lfParticleSystem* sys, int workerCount )
+{
+	int total = 0;
+	for ( int w = 0; w < workerCount; w++ )
+	{
+		total += sys->contactBucketCount[w];
+	}
+	GrowParticleContactCap( sys, total );
+	sys->particleContactCount = 0;
+	for ( int w = 0; w < workerCount; w++ )
+	{
+		int n = sys->contactBucketCount[w];
+		if ( n <= 0 )
+		{
+			continue;
+		}
+		memcpy( sys->particleContacts + sys->particleContactCount, sys->contactBucket[w],
+				(size_t)n * sizeof( lfParticleContact ) );
+		sys->particleContactCount += n;
+	}
+}
+
+static void FindParticleContacts( lfParticleSystem* sys )
+{
+	sys->particleContactCount = 0;
+	const int n = sys->count;
+	if ( n < LF_CONTACT_PARALLEL_MIN || g_lfWorkerCount <= 1 || g_lfEnqueue == NULL )
+	{
+		const float squaredDiameter = sys->diameter * sys->diameter;
+		const float invDiameter = sys->invDiameter;
+		const float* posX = sys->posX;
+		const float* posY = sys->posY;
+		for ( int i = 0; i < n; i++ )
+		{
+			int ix = sys->cellX[i];
+			int iy = sys->cellY[i];
+			for ( int dy = -1; dy <= 1; dy++ )
+			{
+				for ( int dx = -1; dx <= 1; dx++ )
+				{
+					uint32_t cell = HashCell( ix + dx, iy + dy, sys->hashSize );
+					for ( uint16_t j = sys->cellHead[cell]; j != LF_EMPTY_PARTICLE; j = sys->next[j] )
+					{
+						if ( (int)j <= i )
+						{
+							continue;
+						}
+						float ddx = posX[j] - posX[i];
+						float ddy = posY[j] - posY[i];
+						float distSqr = ddx * ddx + ddy * ddy;
+						if ( distSqr < squaredDiameter && distSqr > 1e-9f )
+						{
+							float invD = 1.0f / sqrtf( distSqr );
+							b2Vec2 normal = { ddx * invD, ddy * invD };
+							float weight = 1.0f - distSqr * invD * invDiameter;
+							PushParticleContact( sys, i, j, normal, weight );
+						}
+					}
+				}
+			}
+		}
+		return;
+	}
+
+	const int workerCount = g_lfWorkerCount;
+	for ( int w = 0; w < workerCount; w++ )
+	{
+		sys->contactBucketCount[w] = 0;
+	}
+	lfParallelFor( &FindContactsRange, n, LF_CONTACT_MIN_RANGE, sys );
+	MergeContactBuckets( sys, workerCount );
 }
 
 // ------------------------------------------------------------------------

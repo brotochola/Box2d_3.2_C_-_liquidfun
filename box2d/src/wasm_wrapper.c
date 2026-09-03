@@ -1,6 +1,8 @@
 // box2d/src/wasm_wrapper.c — physics glue in physics_post.js (post-js)
 #include "box2d/box2d.h"
 #include "state_export.h"
+#include "physics_world.h"
+#include "scheduler.h"
 #include "liquidfun/lf_particle_system.h"
 
 #include <emscripten.h>
@@ -85,6 +87,26 @@ static b2WorldId unpack_world_id( uint32_t packed )
 	b2WorldId id;
 	memcpy( &id, &packed, sizeof( id ) );
 	return id;
+}
+
+static void lf_reset_box2d_scheduler( void* user )
+{
+	if ( user != NULL )
+	{
+		b2ResetScheduler( (b2Scheduler*)user );
+	}
+}
+
+static void bind_lf_task_system( b2WorldId worldId )
+{
+	b2World* world = b2GetWorldFromId( worldId );
+	if ( world == NULL )
+	{
+		lfSetTaskSystem( NULL, NULL, NULL, 1, NULL );
+		return;
+	}
+	lfSetTaskSystem( world->enqueueTaskFcn, world->finishTaskFcn, world->userTaskContext, world->workerCount,
+					 world->scheduler != NULL ? lf_reset_box2d_scheduler : NULL );
 }
 
 static float* g_state_buffer = NULL;
@@ -877,7 +899,9 @@ uint32_t create_world(
 		workerCount = WASM_PTHREAD_POOL_SIZE;
 	}
 	worldDef.workerCount = workerCount;
-	return pack_world_id( b2CreateWorld( &worldDef ) );
+	b2WorldId worldId = b2CreateWorld( &worldDef );
+	bind_lf_task_system( worldId );
+	return pack_world_id( worldId );
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -2794,6 +2818,12 @@ EMSCRIPTEN_KEEPALIVE
 float get_liquidfun_step_ms( void )
 {
 	return g_liquidfun_step_ms;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_lf_worker_count( void )
+{
+	return lfGetWorkerCount();
 }
 
 EMSCRIPTEN_KEEPALIVE

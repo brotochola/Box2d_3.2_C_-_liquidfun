@@ -547,7 +547,7 @@
         contactDampingRatio: 10,
         contactSpeed: 3,
         maximumLinearSpeed: 400,
-        box2dWorkerCount: 4,
+        box2dWorkerCount: 2,
       });
       world.bindBuffers(BODY_COUNT);
 
