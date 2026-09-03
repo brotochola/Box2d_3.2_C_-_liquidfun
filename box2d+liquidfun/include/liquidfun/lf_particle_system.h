@@ -277,6 +277,12 @@ B2_API int lfParticleSystem_CopyGroupSlots( const lfParticleSystem* system, uint
 											uint32_t* groupFlagsOut, float* strengthOut, float* viscousScaleOut,
 											int* firstIndexOut, int* lastIndexOut, int maxSlots );
 
+// Compact alive groups into caller SoA (dead holes skipped). Returns written count.
+B2_API int lfParticleSystem_SyncActiveGroups( const lfParticleSystem* system, int* idOut, int* countOut,
+											  int* firstOut, int* lastOut, float* viscOut, float* xOut, float* yOut,
+											  float* vxOut, float* vyOut, float* angVelOut, float* angleOut,
+											  int maxGroups );
+
 // Copy spring/barrier pairs into SoA outs. Writes min(pairCount, maxPairs); returns pair count.
 B2_API int lfParticleSystem_CopyPairs( const lfParticleSystem* system, uint16_t* aOut, uint16_t* bOut,
 									   uint32_t* flagsOut, float* distanceOut, float* strengthOut, int maxPairs );

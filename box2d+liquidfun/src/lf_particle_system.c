@@ -3658,6 +3658,71 @@ int lfParticleSystem_GetPairCount( const lfParticleSystem* sys )
 	return sys != NULL ? sys->pairCount : 0;
 }
 
+int lfParticleSystem_SyncActiveGroups( const lfParticleSystem* sys, int* idOut, int* countOut, int* firstOut,
+										int* lastOut, float* viscOut, float* xOut, float* yOut, float* vxOut,
+										float* vyOut, float* angVelOut, float* angleOut, int maxGroups )
+{
+	if ( sys == NULL || maxGroups <= 0 )
+	{
+		return 0;
+	}
+	int w = 0;
+	for ( int gid = 0; gid < sys->groupCount && w < maxGroups; gid++ )
+	{
+		const lfParticleGroup* g = &sys->groups[gid];
+		if ( !g->alive )
+		{
+			continue;
+		}
+		if ( idOut )
+		{
+			idOut[w] = gid;
+		}
+		if ( countOut )
+		{
+			countOut[w] = g->count;
+		}
+		if ( firstOut )
+		{
+			firstOut[w] = g->firstIndex;
+		}
+		if ( lastOut )
+		{
+			lastOut[w] = g->lastIndex;
+		}
+		if ( viscOut )
+		{
+			viscOut[w] = g->viscousScale;
+		}
+		if ( xOut )
+		{
+			xOut[w] = g->center.x;
+		}
+		if ( yOut )
+		{
+			yOut[w] = g->center.y;
+		}
+		if ( vxOut )
+		{
+			vxOut[w] = g->linearVelocity.x;
+		}
+		if ( vyOut )
+		{
+			vyOut[w] = g->linearVelocity.y;
+		}
+		if ( angVelOut )
+		{
+			angVelOut[w] = g->angularVelocity;
+		}
+		if ( angleOut )
+		{
+			angleOut[w] = g->angle;
+		}
+		w++;
+	}
+	return w;
+}
+
 int lfParticleSystem_CopyGroupSlots( const lfParticleSystem* sys, uint8_t* aliveOut, uint32_t* flagsOut,
 									 uint32_t* groupFlagsOut, float* strengthOut, float* viscousScaleOut,
 									 int* firstIndexOut, int* lastIndexOut, int maxSlots )

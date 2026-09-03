@@ -9,6 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined( __SSE2__ )
+#include <emmintrin.h>
+#define LF_WASM_SSE2 1
+#endif
+
 #define MAX_BODIES 65535
 #define MAX_PARTICLES 65535
 #define MAX_JOINTS 4096
@@ -2638,7 +2643,7 @@ void particle_group_apply_linear_impulse( int groupId, float ix, float iy )
 	lfParticleSystem_GroupApplyLinearImpulse( g_particles, (lfParticleGroupId)groupId, ( b2Vec2 ){ ix, iy } );
 }
 
-#define MAX_PARTICLE_QUERY_HITS 512
+#define MAX_PARTICLE_QUERY_HITS 4096
 static int g_particle_query_hits[MAX_PARTICLE_QUERY_HITS];
 static int g_particle_query_hit_count = 0;
 
@@ -2677,6 +2682,188 @@ int get_particle_query_hit( int i )
 		return -1;
 	}
 	return g_particle_query_hits[i];
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_particle_query_hits_byte_offset( void )
+{
+	return (int)( (uintptr_t)g_particle_query_hits );
+}
+
+#define LF_SYNC_MAX_GROUPS 256
+
+typedef struct LfSyncGroupsSoa
+{
+	int32_t id[LF_SYNC_MAX_GROUPS];
+	int32_t particleCount[LF_SYNC_MAX_GROUPS];
+	int32_t firstIndex[LF_SYNC_MAX_GROUPS];
+	int32_t lastIndex[LF_SYNC_MAX_GROUPS];
+	float viscousScale[LF_SYNC_MAX_GROUPS];
+	float x[LF_SYNC_MAX_GROUPS];
+	float y[LF_SYNC_MAX_GROUPS];
+	float vx[LF_SYNC_MAX_GROUPS];
+	float vy[LF_SYNC_MAX_GROUPS];
+	float angularVelocity[LF_SYNC_MAX_GROUPS];
+	float angle[LF_SYNC_MAX_GROUPS];
+} LfSyncGroupsSoa;
+
+static LfSyncGroupsSoa g_lf_sync_groups;
+
+EMSCRIPTEN_KEEPALIVE
+int get_sync_particle_groups_max( void )
+{
+	return LF_SYNC_MAX_GROUPS;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_sync_particle_groups_byte_offset( void )
+{
+	return (int)( (uintptr_t)&g_lf_sync_groups );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int sync_active_particle_groups( int maxGroups )
+{
+	int cap = maxGroups;
+	if ( cap > LF_SYNC_MAX_GROUPS )
+	{
+		cap = LF_SYNC_MAX_GROUPS;
+	}
+	if ( cap <= 0 || g_particles == NULL )
+	{
+		return 0;
+	}
+	return lfParticleSystem_SyncActiveGroups(
+		g_particles, g_lf_sync_groups.id, g_lf_sync_groups.particleCount, g_lf_sync_groups.firstIndex,
+		g_lf_sync_groups.lastIndex, g_lf_sync_groups.viscousScale, g_lf_sync_groups.x, g_lf_sync_groups.y,
+		g_lf_sync_groups.vx, g_lf_sync_groups.vy, g_lf_sync_groups.angularVelocity, g_lf_sync_groups.angle, cap );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void cull_particles_outside_bounds( float xMin, float yMin, float xMax, float yMax )
+{
+	if ( g_particles == NULL )
+	{
+		return;
+	}
+	int count = g_particle_count_value;
+	if ( count <= 0 )
+	{
+		return;
+	}
+	const float* x = lfParticleSystem_GetPositionXBuffer( g_particles );
+	const float* y = lfParticleSystem_GetPositionYBuffer( g_particles );
+	uint32_t* flags = (uint32_t*)lfParticleSystem_GetFlagsBuffer( g_particles );
+	if ( x == NULL || y == NULL || flags == NULL )
+	{
+		return;
+	}
+	int i = 0;
+#if defined( LF_WASM_SSE2 )
+	{
+		const __m128 vminx = _mm_set1_ps( xMin );
+		const __m128 vminy = _mm_set1_ps( yMin );
+		const __m128 vmaxx = _mm_set1_ps( xMax );
+		const __m128 vmaxy = _mm_set1_ps( yMax );
+		const __m128i vzombie = _mm_set1_epi32( (int)lf_zombieParticle );
+		for ( ; i + 4 <= count; i += 4 )
+		{
+			__m128 px = _mm_loadu_ps( x + i );
+			__m128 py = _mm_loadu_ps( y + i );
+			__m128 oob = _mm_or_ps( _mm_or_ps( _mm_cmplt_ps( px, vminx ), _mm_cmpgt_ps( px, vmaxx ) ),
+									 _mm_or_ps( _mm_cmplt_ps( py, vminy ), _mm_cmpgt_ps( py, vmaxy ) ) );
+			__m128i bits = _mm_and_si128( _mm_castps_si128( oob ), vzombie );
+			__m128i f = _mm_loadu_si128( (const __m128i*)( flags + i ) );
+			_mm_storeu_si128( (__m128i*)( flags + i ), _mm_or_si128( f, bits ) );
+		}
+	}
+#endif
+	for ( ; i < count; i++ )
+	{
+		if ( x[i] < xMin || y[i] < yMin || x[i] > xMax || y[i] > yMax )
+		{
+			flags[i] |= lf_zombieParticle;
+		}
+	}
+}
+
+static float g_lf_xy_scratch[MAX_PARTICLES * 2];
+
+static void lf_interleave_xy( const float* xs, const float* ys, float* out, int n )
+{
+	int i = 0;
+#if defined( LF_WASM_SSE2 )
+	for ( ; i + 4 <= n; i += 4 )
+	{
+		__m128 vx = _mm_loadu_ps( xs + i );
+		__m128 vy = _mm_loadu_ps( ys + i );
+		_mm_storeu_ps( out + i * 2, _mm_unpacklo_ps( vx, vy ) );
+		_mm_storeu_ps( out + i * 2 + 4, _mm_unpackhi_ps( vx, vy ) );
+	}
+#endif
+	for ( ; i < n; i++ )
+	{
+		out[i * 2] = xs[i];
+		out[i * 2 + 1] = ys[i];
+	}
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_particle_xy_scratch_byte_offset( void )
+{
+	return (int)( (uintptr_t)g_lf_xy_scratch );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int copy_particle_pos_xy_interleaved( void )
+{
+	if ( g_particles == NULL )
+	{
+		return 0;
+	}
+	int n = g_particle_count_value;
+	if ( n > MAX_PARTICLES )
+	{
+		n = MAX_PARTICLES;
+	}
+	if ( n <= 0 )
+	{
+		return 0;
+	}
+	const float* xs = lfParticleSystem_GetPositionXBuffer( g_particles );
+	const float* ys = lfParticleSystem_GetPositionYBuffer( g_particles );
+	if ( xs == NULL || ys == NULL )
+	{
+		return 0;
+	}
+	lf_interleave_xy( xs, ys, g_lf_xy_scratch, n );
+	return n;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int copy_particle_vel_xy_interleaved( void )
+{
+	if ( g_particles == NULL )
+	{
+		return 0;
+	}
+	int n = g_particle_count_value;
+	if ( n > MAX_PARTICLES )
+	{
+		n = MAX_PARTICLES;
+	}
+	if ( n <= 0 )
+	{
+		return 0;
+	}
+	const float* vx = lfParticleSystem_GetVelocityXBuffer( g_particles );
+	const float* vy = lfParticleSystem_GetVelocityYBuffer( g_particles );
+	if ( vx == NULL || vy == NULL )
+	{
+		return 0;
+	}
+	lf_interleave_xy( vx, vy, g_lf_xy_scratch, n );
+	return n;
 }
 
 EMSCRIPTEN_KEEPALIVE
