@@ -844,6 +844,44 @@ static int AllocGroup( lfParticleSystem* sys )
 	return sys->groupCount++;
 }
 
+// Rest pose + COM/mass/inertia from current positions. Does not touch velocity.
+static void RebuildGroupRestFromPositions( lfParticleSystem* sys, lfParticleGroup* g )
+{
+	int start = g->firstIndex;
+	int end = g->lastIndex;
+	int n = end - start;
+	if ( n <= 0 )
+	{
+		g->center = ( b2Vec2 ){ 0.0f, 0.0f };
+		g->mass = 0.0f;
+		g->invMass = 0.0f;
+		g->invInertia = 0.0f;
+		g->angle = 0.0f;
+		return;
+	}
+
+	b2Vec2 com = { 0.0f, 0.0f };
+	for ( int i = start; i < end; i++ )
+	{
+		com = b2Add( com, ( (b2Vec2){ sys->posX[i], sys->posY[i] } ) );
+	}
+	com = b2MulSV( 1.0f / (float)n, com );
+
+	g->center = com;
+	g->mass = sys->particleMass * (float)n;
+	g->invMass = g->mass > 0.0f ? 1.0f / g->mass : 0.0f;
+	g->angle = 0.0f;
+
+	float inertia = 0.0f;
+	for ( int i = start; i < end; i++ )
+	{
+		b2Vec2 offset = b2Sub( ( (b2Vec2){ sys->posX[i], sys->posY[i] } ), com );
+		sys->restOffset[i] = offset;
+		inertia += sys->particleMass * b2LengthSquared( offset );
+	}
+	g->invInertia = inertia > 0.0f ? 1.0f / inertia : 0.0f;
+}
+
 static void InitGroupFromRange( lfParticleSystem* sys, int gid, int start, int n, const lfParticleGroupDef* def )
 {
 	lfParticleGroup* g = &sys->groups[gid];
@@ -856,6 +894,8 @@ static void InitGroupFromRange( lfParticleSystem* sys, int gid, int start, int n
 	g->firstIndex = start;
 	g->lastIndex = start + n;
 	g->count = n;
+	g->linearVelocity = def->linearVelocity;
+	g->angularVelocity = def->angularVelocity;
 
 	if ( n <= 0 )
 	{
@@ -863,33 +903,20 @@ static void InitGroupFromRange( lfParticleSystem* sys, int gid, int start, int n
 		return;
 	}
 
-	b2Vec2 com = { 0.0f, 0.0f };
-	for ( int i = start; i < start + n; i++ )
-	{
-		com = b2Add( com, ( (b2Vec2){ sys->posX[i], sys->posY[i] } ) );
-	}
-	com = b2MulSV( 1.0f / (float)n, com );
-
-	g->center = com;
-	g->mass = sys->particleMass * (float)n;
-	g->invMass = g->mass > 0.0f ? 1.0f / g->mass : 0.0f;
-	g->linearVelocity = def->linearVelocity;
-	g->angularVelocity = def->angularVelocity;
-	g->angle = 0.0f;
-
-	float inertia = 0.0f;
 	for ( int i = start; i < start + n; i++ )
 	{
 		sys->groupIndex[i] = gid;
 		sys->flags[i] |= def->flags;
-		b2Vec2 offset = b2Sub( ( (b2Vec2){ sys->posX[i], sys->posY[i] } ), com );
-		sys->restOffset[i] = offset;
-		inertia += sys->particleMass * b2LengthSquared( offset );
+	}
 
+	RebuildGroupRestFromPositions( sys, g );
+
+	for ( int i = start; i < start + n; i++ )
+	{
+		b2Vec2 offset = sys->restOffset[i];
 		b2Vec2 spin = b2MulSV( def->angularVelocity, b2LeftPerp( offset ) );
 		{ b2Vec2 __v = b2Add( def->linearVelocity, spin ); sys->velX[i] = __v.x; sys->velY[i] = __v.y; }
 	}
-	g->invInertia = inertia > 0.0f ? 1.0f / inertia : 0.0f;
 
 	if ( ( g->groupFlags & lf_solidParticleGroup ) != 0 )
 	{
@@ -1599,9 +1626,13 @@ static void SolveZombie( lfParticleSystem* sys )
 			group->firstIndex = firstIndex;
 			group->lastIndex = lastIndex;
 			group->count = lastIndex - firstIndex;
-			if ( modified && ( group->groupFlags & lf_solidParticleGroup ) != 0 )
+			if ( modified )
 			{
-				group->groupFlags |= lf_particleGroupNeedsUpdateDepth;
+				RebuildGroupRestFromPositions( sys, group );
+				if ( ( group->groupFlags & lf_solidParticleGroup ) != 0 )
+				{
+					group->groupFlags |= lf_particleGroupNeedsUpdateDepth;
+				}
 			}
 		}
 		else
@@ -3238,6 +3269,7 @@ static void ComputeDepth( lfParticleSystem* sys )
 		return;
 	}
 
+	int dirtySolidCount = 0;
 	for ( int g = 0; g < sys->groupCount; g++ )
 	{
 		lfParticleGroup* group = &sys->groups[g];
@@ -3245,33 +3277,47 @@ static void ComputeDepth( lfParticleSystem* sys )
 		{
 			continue;
 		}
-		group->groupFlags &= ~lf_particleGroupNeedsUpdateDepth;
+		if ( ( group->groupFlags & lf_solidParticleGroup ) == 0 )
+		{
+			continue;
+		}
+		dirtySolidCount += group->lastIndex - group->firstIndex;
 		for ( int i = group->firstIndex; i < group->lastIndex; i++ )
 		{
 			sys->accumulation[i] = 0.0f;
 		}
 	}
 
-	for ( int k = 0; k < sys->particleContactCount; k++ )
+	int qualifyingCount = 0;
+	if ( sys->staticPressureContactIndices != NULL )
 	{
-		const lfParticleContact* c = &sys->particleContacts[k];
-		int a = c->a;
-		int b = c->b;
-		int ga = sys->groupIndex[a];
-		int gb = sys->groupIndex[b];
-		if ( ga < 0 || ga != gb || !sys->groups[ga].alive )
+		for ( int k = 0; k < sys->particleContactCount; k++ )
 		{
-			continue;
+			const lfParticleContact* c = &sys->particleContacts[k];
+			int a = c->a;
+			int b = c->b;
+			int ga = sys->groupIndex[a];
+			if ( ga < 0 || ga != sys->groupIndex[b] )
+			{
+				continue;
+			}
+			lfParticleGroup* group = &sys->groups[ga];
+			if ( !group->alive || ( group->groupFlags & lf_solidParticleGroup ) == 0 ||
+				 ( group->groupFlags & lf_particleGroupNeedsUpdateDepth ) == 0 )
+			{
+				continue;
+			}
+			sys->accumulation[a] += c->weight;
+			sys->accumulation[b] += c->weight;
+			sys->staticPressureContactIndices[qualifyingCount++] = k;
 		}
-		// Depth uses intra-group contacts (Google ComputeDepthAccumulation).
-		sys->accumulation[a] += c->weight;
-		sys->accumulation[b] += c->weight;
 	}
 
 	for ( int g = 0; g < sys->groupCount; g++ )
 	{
 		lfParticleGroup* group = &sys->groups[g];
-		if ( !group->alive || ( group->groupFlags & lf_solidParticleGroup ) == 0 )
+		if ( !group->alive || ( group->groupFlags & lf_solidParticleGroup ) == 0 ||
+			 ( group->groupFlags & lf_particleGroupNeedsUpdateDepth ) == 0 )
 		{
 			continue;
 		}
@@ -3282,24 +3328,18 @@ static void ComputeDepth( lfParticleSystem* sys )
 		}
 	}
 
-	int iterationCount = (int)sqrtf( (float)sys->count );
+	int iterationCount = (int)sqrtf( (float)( dirtySolidCount > 0 ? dirtySolidCount : 1 ) );
 	if ( iterationCount < 1 )
 	{
 		iterationCount = 1;
 	}
 	for ( int t = 0; t < iterationCount; t++ )
 	{
-		for ( int k = 0; k < sys->particleContactCount; k++ )
+		for ( int q = 0; q < qualifyingCount; q++ )
 		{
-			const lfParticleContact* c = &sys->particleContacts[k];
+			const lfParticleContact* c = &sys->particleContacts[sys->staticPressureContactIndices[q]];
 			int a = c->a;
 			int b = c->b;
-			int ga = sys->groupIndex[a];
-			int gb = sys->groupIndex[b];
-			if ( ga < 0 || ga != gb )
-			{
-				continue;
-			}
 			float r = 1.0f - c->weight;
 			float da = sys->depth[a];
 			float db = sys->depth[b];
@@ -3313,6 +3353,14 @@ static void ComputeDepth( lfParticleSystem* sys )
 			{
 				sys->depth[b] = targetB;
 			}
+		}
+	}
+
+	for ( int g = 0; g < sys->groupCount; g++ )
+	{
+		if ( sys->groups[g].alive )
+		{
+			sys->groups[g].groupFlags &= ~lf_particleGroupNeedsUpdateDepth;
 		}
 	}
 
