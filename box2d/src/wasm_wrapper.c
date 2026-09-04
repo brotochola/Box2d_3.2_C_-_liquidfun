@@ -657,6 +657,47 @@ static void write_joint_meta( int handle, int jointType, int flags, float ax, fl
 	joint[7] = rotS;
 }
 
+static void drop_wrapper_joint( int handle )
+{
+	if ( handle < 0 || handle >= MAX_JOINTS || !g_joints[handle].active )
+	{
+		return;
+	}
+	g_joints[handle].active = 0;
+	g_joints[handle].id = b2_nullJointId;
+	write_joint_meta( handle, 0, b2_game_joint_disabled, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f );
+	free_joint_slot( handle );
+}
+
+/* b2DestroyBody frees attached Box2D joints; wrapper handles must die first or
+ * step_world → export_all_joints walks stale ids (b2Array_Get OOB). */
+static void abandon_wrapper_joints_for_body( b2BodyId bodyId )
+{
+	if ( !B2_IS_NON_NULL( bodyId ) )
+	{
+		return;
+	}
+	for ( int handle = 0; handle < g_joint_high_water; ++handle )
+	{
+		if ( !g_joints[handle].active )
+		{
+			continue;
+		}
+		b2JointId jid = g_joints[handle].id;
+		if ( !b2Joint_IsValid( jid ) )
+		{
+			drop_wrapper_joint( handle );
+			continue;
+		}
+		b2BodyId a = b2Joint_GetBodyA( jid );
+		b2BodyId b = b2Joint_GetBodyB( jid );
+		if ( B2_ID_EQUALS( a, bodyId ) || B2_ID_EQUALS( b, bodyId ) )
+		{
+			drop_wrapper_joint( handle );
+		}
+	}
+}
+
 static void export_joint_state( int handle )
 {
 	if ( handle < 0 || handle >= MAX_JOINTS || !g_joints[handle].active )
@@ -666,6 +707,11 @@ static void export_joint_state( int handle )
 	}
 
 	b2JointId jointId = g_joints[handle].id;
+	if ( !b2Joint_IsValid( jointId ) )
+	{
+		drop_wrapper_joint( handle );
+		return;
+	}
 	b2BodyId bodyA = b2Joint_GetBodyA( jointId );
 	b2BodyId bodyB = b2Joint_GetBodyB( jointId );
 	b2WorldTransform xfA = b2Body_GetTransform( bodyA );
@@ -1235,6 +1281,7 @@ void destroy_body( int slot )
 		return;
 	}
 
+	abandon_wrapper_joints_for_body( g_slots[slot].id );
 	b2DestroyBody( g_slots[slot].id );
 	g_slots[slot].active = 0;
 	g_slots[slot].id = b2_nullBodyId;
@@ -1932,6 +1979,10 @@ int create_weld_joint( uint32_t worldPacked, int slotA, int slotB, float anchorX
 	{
 		return -1;
 	}
+	if ( B2_ID_EQUALS( bodyA, bodyB ) )
+	{
+		return -1;
+	}
 
 	b2WeldJointDef def = b2DefaultWeldJointDef();
 	set_joint_anchors( &def.base, bodyA, bodyB, anchorX, anchorY );
@@ -2008,6 +2059,10 @@ int create_weld_joint_local( uint32_t worldPacked, int slotA, int slotB, float l
 	{
 		return -1;
 	}
+	if ( B2_ID_EQUALS( bodyA, bodyB ) )
+	{
+		return -1;
+	}
 
 	b2WeldJointDef def = b2DefaultWeldJointDef();
 	set_joint_local_anchors( &def.base, bodyA, bodyB, lax, lay, lbx, lby );
@@ -2028,10 +2083,12 @@ void destroy_joint( int handle )
 		return;
 	}
 
-	b2DestroyJoint( g_joints[handle].id, true );
-	g_joints[handle].active = 0;
-	write_joint_meta( handle, 0, b2_game_joint_disabled, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f );
-	free_joint_slot( handle );
+	b2JointId jointId = g_joints[handle].id;
+	if ( b2Joint_IsValid( jointId ) )
+	{
+		b2DestroyJoint( jointId, true );
+	}
+	drop_wrapper_joint( handle );
 }
 
 EMSCRIPTEN_KEEPALIVE
