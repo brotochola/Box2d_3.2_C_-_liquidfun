@@ -26,6 +26,10 @@ weedjs/
 /box2d_wasm.wasm
 /box2d_wasm.worker.js
 /box2d_wasm.opt.wasm
+/box2dWasm.js
+/box2dWasm.wasm
+/box2dWasm.worker.js
+/box2dWasm.opt.wasm
 
 # IDE & OS
 .vscode/

@@ -2453,7 +2453,8 @@ int create_particle_box( float x0, float y0, float x1, float y1, float spacing, 
 EMSCRIPTEN_KEEPALIVE
 int create_particle_group_box( float x0, float y0, float x1, float y1, float spacing, uint32_t flags, float strength,
 								float lifetimeMinSec, float lifetimeMaxSec, int fadeToAlpha0, float viscousScale,
-								int trackGroup, uint32_t groupFlags )
+								int trackGroup, uint32_t groupFlags, float vx, float vy, float omega,
+								uint32_t userData, uint32_t color )
 {
 	if ( g_particles == NULL )
 	{
@@ -2470,6 +2471,11 @@ int create_particle_group_box( float x0, float y0, float x1, float y1, float spa
 	def.fadeToAlpha0 = fadeToAlpha0;
 	def.viscousScale = viscousScale > 0.0f ? viscousScale : 1.0f;
 	def.trackGroup = trackGroup;
+	// Trailing f32: omitted JS args are NaN. lfSanitizeFinite in CreateParticle/InitGroup.
+	def.linearVelocity = ( b2Vec2 ){ vx, vy };
+	def.angularVelocity = omega;
+	def.userData = userData;
+	def.color = color;
 	lfParticleGroupId id = lfParticleSystem_CreateParticleGroupBox( g_particles, &def );
 	g_particle_count_value = lfParticleSystem_GetParticleCount( g_particles );
 	return (int)id;
@@ -2478,7 +2484,8 @@ int create_particle_group_box( float x0, float y0, float x1, float y1, float spa
 EMSCRIPTEN_KEEPALIVE
 int create_particle_group_circle( float cx, float cy, float radius, float spacing, uint32_t flags, float strength,
 								   float lifetimeMinSec, float lifetimeMaxSec, int fadeToAlpha0, float viscousScale,
-								   int trackGroup, uint32_t groupFlags )
+								   int trackGroup, uint32_t groupFlags, float vx, float vy, float omega,
+								   uint32_t userData, uint32_t color )
 {
 	if ( g_particles == NULL )
 	{
@@ -2496,6 +2503,10 @@ int create_particle_group_circle( float cx, float cy, float radius, float spacin
 	def.fadeToAlpha0 = fadeToAlpha0;
 	def.viscousScale = viscousScale > 0.0f ? viscousScale : 1.0f;
 	def.trackGroup = trackGroup;
+	def.linearVelocity = ( b2Vec2 ){ vx, vy };
+	def.angularVelocity = omega;
+	def.userData = userData;
+	def.color = color;
 	lfParticleGroupId id = lfParticleSystem_CreateParticleGroupCircle( g_particles, &def );
 	g_particle_count_value = lfParticleSystem_GetParticleCount( g_particles );
 	return (int)id;
@@ -2761,7 +2772,8 @@ typedef struct LfSyncGroupsSoa
 	float vx[LF_SYNC_MAX_GROUPS];
 	float vy[LF_SYNC_MAX_GROUPS];
 	float angularVelocity[LF_SYNC_MAX_GROUPS];
-	float angle[LF_SYNC_MAX_GROUPS];
+		float angle[LF_SYNC_MAX_GROUPS];
+	uint32_t groupFlags[LF_SYNC_MAX_GROUPS];
 } LfSyncGroupsSoa;
 
 static LfSyncGroupsSoa g_lf_sync_groups;
@@ -2793,7 +2805,8 @@ int sync_active_particle_groups( int maxGroups )
 	return lfParticleSystem_SyncActiveGroups(
 		g_particles, g_lf_sync_groups.id, g_lf_sync_groups.particleCount, g_lf_sync_groups.firstIndex,
 		g_lf_sync_groups.lastIndex, g_lf_sync_groups.viscousScale, g_lf_sync_groups.x, g_lf_sync_groups.y,
-		g_lf_sync_groups.vx, g_lf_sync_groups.vy, g_lf_sync_groups.angularVelocity, g_lf_sync_groups.angle, cap );
+		g_lf_sync_groups.vx, g_lf_sync_groups.vy, g_lf_sync_groups.angularVelocity, g_lf_sync_groups.angle,
+		g_lf_sync_groups.groupFlags, cap );
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -2857,7 +2870,7 @@ int get_particle_weight_byte_offset( void )
 
 EMSCRIPTEN_KEEPALIVE
 int restore_particles( int count, const float* x, const float* y, const float* vx, const float* vy,
-					   const uint32_t* flags )
+					   const uint32_t* flags, const uint32_t* userData, const uint32_t* color )
 {
 	if ( g_particles == NULL )
 	{
@@ -2874,6 +2887,14 @@ int restore_particles( int count, const float* x, const float* y, const float* v
 		def.position = ( b2Vec2 ){ x[i], y[i] };
 		def.velocity = ( b2Vec2 ){ vx[i], vy[i] };
 		def.flags = flags[i];
+		if ( userData )
+		{
+			def.userData = userData[i];
+		}
+		if ( color )
+		{
+			def.color = color[i];
+		}
 		if ( lfParticleSystem_CreateParticle( g_particles, &def ) < 0 )
 		{
 			g_particle_count_value = lfParticleSystem_GetParticleCount( g_particles );
@@ -3065,6 +3086,209 @@ int get_particle_vy_byte_offset( void )
 	}
 	const float* vy = lfParticleSystem_GetVelocityYBuffer( g_particles );
 	return vy == NULL ? 0 : (int)( (uintptr_t)vy );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_particle_user_data_byte_offset( void )
+{
+	if ( g_particles == NULL )
+	{
+		return 0;
+	}
+	const uint32_t* buf = lfParticleSystem_GetUserDataBuffer( g_particles );
+	return buf == NULL ? 0 : (int)( (uintptr_t)buf );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_particle_color_byte_offset( void )
+{
+	if ( g_particles == NULL )
+	{
+		return 0;
+	}
+	const uint32_t* buf = lfParticleSystem_GetColorBuffer( g_particles );
+	return buf == NULL ? 0 : (int)( (uintptr_t)buf );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_particle_viscous_scale_byte_offset( void )
+{
+	if ( g_particles == NULL )
+	{
+		return 0;
+	}
+	const float* buf = lfParticleSystem_GetViscousScaleBuffer( g_particles );
+	return buf == NULL ? 0 : (int)( (uintptr_t)buf );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void set_particle_user_data( int index, uint32_t userData )
+{
+	if ( g_particles == NULL )
+	{
+		return;
+	}
+	lfParticleSystem_SetParticleUserData( g_particles, index, userData );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void set_particle_user_data_range( int firstIndex, int lastIndex, uint32_t userData )
+{
+	if ( g_particles == NULL )
+	{
+		return;
+	}
+	lfParticleSystem_SetParticleUserDataRange( g_particles, firstIndex, lastIndex, userData );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void set_particle_color( int index, uint32_t color )
+{
+	if ( g_particles == NULL )
+	{
+		return;
+	}
+	lfParticleSystem_SetParticleColor( g_particles, index, color );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void set_particle_color_range( int firstIndex, int lastIndex, uint32_t color )
+{
+	if ( g_particles == NULL )
+	{
+		return;
+	}
+	lfParticleSystem_SetParticleColorRange( g_particles, firstIndex, lastIndex, color );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void set_particle_flags( int index, uint32_t flags )
+{
+	if ( g_particles == NULL )
+	{
+		return;
+	}
+	lfParticleSystem_SetParticleFlags( g_particles, index, flags );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void set_particle_viscous_scale( int index, float scale )
+{
+	if ( g_particles == NULL )
+	{
+		return;
+	}
+	lfParticleSystem_SetParticleViscousScale( g_particles, index, scale );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void set_particle_viscous_scale_range( int firstIndex, int lastIndex, float scale )
+{
+	if ( g_particles == NULL )
+	{
+		return;
+	}
+	lfParticleSystem_SetParticleViscousScaleRange( g_particles, firstIndex, lastIndex, scale );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void set_particle_group_flags( int groupId, uint32_t groupFlags )
+{
+	if ( g_particles == NULL )
+	{
+		return;
+	}
+	lfParticleSystem_SetGroupFlags( g_particles, (lfParticleGroupId)groupId, groupFlags );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void destroy_particle( int index )
+{
+	if ( g_particles == NULL )
+	{
+		return;
+	}
+	lfParticleSystem_DestroyParticle( g_particles, index );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int create_particle( float x, float y, float vx, float vy, uint32_t flags, uint32_t userData, uint32_t color )
+{
+	if ( g_particles == NULL )
+	{
+		return -1;
+	}
+	lfParticleDef def = lfDefaultParticleDef();
+	def.position = ( b2Vec2 ){ x, y };
+	def.velocity = ( b2Vec2 ){ vx, vy };
+	def.flags = flags;
+	def.userData = userData;
+	def.color = color;
+	int i = lfParticleSystem_CreateParticle( g_particles, &def );
+	g_particle_count_value = lfParticleSystem_GetParticleCount( g_particles );
+	return i;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void particle_apply_force_range( int firstIndex, int lastIndex, float fx, float fy )
+{
+	if ( g_particles == NULL )
+	{
+		return;
+	}
+	lfParticleSystem_ApplyForce( g_particles, firstIndex, lastIndex, ( b2Vec2 ){ fx, fy } );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void particle_apply_linear_impulse_range( int firstIndex, int lastIndex, float ix, float iy )
+{
+	if ( g_particles == NULL )
+	{
+		return;
+	}
+	lfParticleSystem_ApplyLinearImpulse( g_particles, firstIndex, lastIndex, ( b2Vec2 ){ ix, iy } );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void set_particle_extra_tuning( float ejectionStrength, float colorMixingStrength, float repulsiveStrength )
+{
+	if ( g_particles == NULL )
+	{
+		return;
+	}
+	lfParticleSystem_SetExtraTuning( g_particles, ejectionStrength, colorMixingStrength, repulsiveStrength );
+}
+
+#define MAX_EXTRACT_INDICES 4096
+static int g_extract_indices[MAX_EXTRACT_INDICES];
+
+EMSCRIPTEN_KEEPALIVE
+int get_extract_indices_byte_offset( void )
+{
+	return (int)( (uintptr_t)g_extract_indices );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_extract_indices_max( void )
+{
+	return MAX_EXTRACT_INDICES;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int extract_particles( int groupId, int count, uint32_t groupFlags, int trackGroup )
+{
+	if ( g_particles == NULL || count <= 0 )
+	{
+		return LF_NULL_PARTICLE_GROUP;
+	}
+	if ( count > MAX_EXTRACT_INDICES )
+	{
+		count = MAX_EXTRACT_INDICES;
+	}
+	lfParticleGroupId id = lfParticleSystem_ExtractParticles(
+		g_particles, (lfParticleGroupId)groupId, g_extract_indices, count, groupFlags, trackGroup );
+	g_particle_count_value = lfParticleSystem_GetParticleCount( g_particles );
+	return (int)id;
 }
 
 

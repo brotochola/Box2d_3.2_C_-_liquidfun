@@ -48,6 +48,10 @@ typedef enum lfParticleFlag
 	lf_springParticle = 1 << 6,	  // rest-length springs between neighbors at group create
 	lf_barrierParticle = 1 << 7,  // with wall: zero vel; neighbor pairs form a segment dam
 	lf_staticPressureParticle = 1 << 8, // extra Poisson pressure (does not vanish in a crack)
+	lf_colorMixingParticle = 1 << 9,	  // mix packed RGBA with neighbor contacts (Google MixColors)
+	lf_repulsiveParticle = 1 << 10,	  // extra push vs particles in another group
+	lf_reactiveParticle = 1 << 11,	  // one-shot: recapture spring/barrier pairs, then clear bit
+
 } lfParticleFlag;
 
 // Group construction flags (Google b2ParticleGroupFlag). Separate from
@@ -89,6 +93,8 @@ typedef struct lfParticleSystemDef
 	float staticPressureRelaxation; // Poisson diagonal, default 0.2
 	int staticPressureIterations;	 // Poisson iters, default 8
 	float ejectionStrength;	 // solid inter-group ejection (Google default 0.5)
+	float colorMixingStrength;	 // Google default 0.5; 0 disables mixing
+	float repulsiveStrength;	 // Google default 1.0
 	int maxParticles;		 // initial capacity (and hard cap when growable is false), default 2048
 	bool growable;			 // if false, CreateParticle fails at maxParticles (required for WASM/SAB)
 	bool strictContactCheck; // LF 1.1.0 default false; drop spurious floor+wall corners
@@ -112,6 +118,8 @@ typedef struct lfParticleDef
 	uint32_t flags;
 	b2Vec2 position;
 	b2Vec2 velocity;
+	uint32_t userData; // opaque; compacted with pose. 0 default
+	uint32_t color;	   // packed 0xAARRGGBB. 0 => 0xFF3399FF
 } lfParticleDef;
 
 B2_API lfParticleDef lfDefaultParticleDef( void );
@@ -166,6 +174,8 @@ typedef struct lfParticleGroupDef
 	// When non-zero, render alpha lerps 1→0 over remaining life (opt-in).
 	// Default 0: stay opaque until zombie destroy.
 	int fadeToAlpha0;
+	uint32_t userData; // stamped on members at create
+	uint32_t color;	  // packed 0xAARRGGBB; 0 => 0xFF3399FF
 } lfParticleGroupDef;
 
 B2_API lfParticleGroupDef lfDefaultParticleGroupDef( void );
@@ -198,6 +208,24 @@ B2_API int lfParticleSystem_IsGroupAlive( const lfParticleSystem* system, lfPart
 // Stamp viscousScale onto every live member of the group (and the group field).
 B2_API void lfParticleSystem_SetGroupViscousScale( lfParticleSystem* system, lfParticleGroupId groupId, float scale );
 
+B2_API void lfParticleSystem_SetParticleFlags( lfParticleSystem* system, int index, uint32_t flags );
+B2_API void lfParticleSystem_SetParticleViscousScale( lfParticleSystem* system, int index, float scale );
+B2_API void lfParticleSystem_SetParticleViscousScaleRange( lfParticleSystem* system, int firstIndex, int lastIndex,
+														   float scale );
+B2_API void lfParticleSystem_SetParticleUserData( lfParticleSystem* system, int index, uint32_t userData );
+B2_API void lfParticleSystem_SetParticleUserDataRange( lfParticleSystem* system, int firstIndex, int lastIndex,
+													   uint32_t userData );
+B2_API void lfParticleSystem_SetParticleColor( lfParticleSystem* system, int index, uint32_t color );
+B2_API void lfParticleSystem_SetParticleColorRange( lfParticleSystem* system, int firstIndex, int lastIndex,
+													  uint32_t color );
+
+// Move members of groupId listed in indices[0..count) into a new group.
+// Order-preserving. Remaining slab keeps groupId. Empty original follows
+// CAN_BE_EMPTY. Returns new group id, or LF_NULL_PARTICLE_GROUP.
+B2_API lfParticleGroupId lfParticleSystem_ExtractParticles( lfParticleSystem* system, lfParticleGroupId groupId,
+														 const int* indices, int count, uint32_t groupFlags,
+														 int trackGroup );
+
 // Force / impulse (Google ApplyForce / ApplyLinearImpulse). Range is [first, last).
 // Particle indices are invalid across SolveZombie / RotateBuffer / Split.
 B2_API void lfParticleSystem_ApplyForce( lfParticleSystem* system, int firstIndex, int lastIndex, b2Vec2 force );
@@ -221,6 +249,8 @@ B2_API void lfParticleSystem_SetTuning( lfParticleSystem* system, float dampingS
 										float viscousStrength, float tensileStrength, float powderStrength,
 										float springStrength, float staticPressureStrength,
 										float staticPressureRelaxation, int staticPressureIterations );
+B2_API void lfParticleSystem_SetExtraTuning( lfParticleSystem* system, float ejectionStrength,
+												float colorMixingStrength, float repulsiveStrength );
 
 // ----------------------------------------------------------------------
 // Simulation
@@ -263,6 +293,8 @@ B2_API const uint32_t* lfParticleSystem_GetFlagsBuffer( const lfParticleSystem* 
 // by the same pass that ages/expires particles.
 B2_API const float* lfParticleSystem_GetAlphaBuffer( const lfParticleSystem* system );
 B2_API const float* lfParticleSystem_GetViscousScaleBuffer( const lfParticleSystem* system );
+B2_API const uint32_t* lfParticleSystem_GetUserDataBuffer( const lfParticleSystem* system );
+B2_API const uint32_t* lfParticleSystem_GetColorBuffer( const lfParticleSystem* system );
 // Per-particle contact-weight density proxy (filled each sub-step in ComputeWeight).
 B2_API const float* lfParticleSystem_GetWeightBuffer( const lfParticleSystem* system );
 
@@ -281,7 +313,7 @@ B2_API int lfParticleSystem_CopyGroupSlots( const lfParticleSystem* system, uint
 B2_API int lfParticleSystem_SyncActiveGroups( const lfParticleSystem* system, int* idOut, int* countOut,
 											  int* firstOut, int* lastOut, float* viscOut, float* xOut, float* yOut,
 											  float* vxOut, float* vyOut, float* angVelOut, float* angleOut,
-											  int maxGroups );
+											  uint32_t* groupFlagsOut, int maxGroups );
 
 // Copy spring/barrier pairs into SoA outs. Writes min(pairCount, maxPairs); returns pair count.
 B2_API int lfParticleSystem_CopyPairs( const lfParticleSystem* system, uint16_t* aOut, uint16_t* bOut,

@@ -43,6 +43,22 @@
 // Google b2_barrierCollisionTime. tmax = this * dt.
 #define LF_BARRIER_COLLISION_TIME 2.5f
 #define LF_PAIR_CAPTURE_FLAGS ( lf_springParticle | lf_barrierParticle )
+#define LF_CONTACT_PARALLEL_MIN 4096
+#define LF_CONTACT_MIN_RANGE 256
+#define LF_CONTACT_BLOCKS_PER_WORKER 4
+#define LF_CONTACT_MAX_BLOCKS ( LF_CONTACT_BLOCKS_PER_WORKER * B2_MAX_WORKERS )
+
+// WASM/JS omitted f32 args become NaN (not 0). -ffast-math kills isfinite().
+static float lfSanitizeFinite( float v )
+{
+	uint32_t bits;
+	memcpy( &bits, &v, sizeof( bits ) );
+	if ( ( bits & 0x7fffffffu ) >= 0x7f800000u )
+	{
+		return 0.0f;
+	}
+	return v;
+}
 
 // ------------------------------------------------------------------------
 // Shared Box2D task system (same pthreads as b2World_Step)
@@ -143,6 +159,38 @@ static void lfParallelForTrampoline( void* taskContext )
 	}
 }
 
+static void lfParallelForPlan( int itemCount, int minRange, int* blockSizeOut, int* blockCountOut )
+{
+	if ( minRange < 1 )
+	{
+		minRange = 1;
+	}
+	const int workerCount = g_lfWorkerCount < 1 ? 1 : g_lfWorkerCount;
+	int maxBlockCount = LF_CONTACT_BLOCKS_PER_WORKER * workerCount;
+	if ( maxBlockCount > LF_CONTACT_MAX_BLOCKS )
+	{
+		maxBlockCount = LF_CONTACT_MAX_BLOCKS;
+	}
+	int blockSize;
+	int blockCount;
+	if ( itemCount <= minRange * maxBlockCount )
+	{
+		blockSize = minRange;
+		blockCount = ( itemCount + blockSize - 1 ) / blockSize;
+	}
+	else
+	{
+		blockSize = ( itemCount + maxBlockCount - 1 ) / maxBlockCount;
+		blockCount = ( itemCount + blockSize - 1 ) / blockSize;
+	}
+	if ( blockCount < 1 )
+	{
+		blockCount = 1;
+	}
+	*blockSizeOut = blockSize;
+	*blockCountOut = blockCount;
+}
+
 static void lfParallelFor( lfParallelForCallback* callback, int itemCount, int minRange, void* context )
 {
 	if ( itemCount <= 0 )
@@ -160,24 +208,9 @@ static void lfParallelFor( lfParallelForCallback* callback, int itemCount, int m
 		return;
 	}
 
-	int blocksPerWorker = 4;
-	int maxBlockCount = blocksPerWorker * workerCount;
 	int blockSize;
 	int blockCount;
-	if ( itemCount <= minRange * maxBlockCount )
-	{
-		blockSize = minRange;
-		blockCount = ( itemCount + blockSize - 1 ) / blockSize;
-	}
-	else
-	{
-		blockSize = ( itemCount + maxBlockCount - 1 ) / maxBlockCount;
-		blockCount = ( itemCount + blockSize - 1 ) / blockSize;
-	}
-	if ( blockCount < 1 )
-	{
-		blockCount = 1;
-	}
+	lfParallelForPlan( itemCount, minRange, &blockSize, &blockCount );
 
 	int taskCount = workerCount < blockCount ? workerCount : blockCount;
 
@@ -296,6 +329,8 @@ struct lfParticleSystem
 	// Per-particle multiplier on def.viscousStrength (default 1). Stamped at
 	// create; SetGroupViscousScale rewrites members. SolveViscous reads this.
 	float* viscousScale;
+	uint32_t* userData;
+	uint32_t* color; // packed 0xAARRGGBB
 
 	lfParticleGroup* groups;
 	int groupCount;
@@ -325,10 +360,13 @@ struct lfParticleSystem
 	lfParticleContact* particleContacts;
 	int particleContactCount;
 	int particleContactCapacity;
-	// Per-worker scratch for parallel FindParticleContacts. Merge is serial.
-	lfParticleContact* contactBucket[B2_MAX_WORKERS];
-	int contactBucketCount[B2_MAX_WORKERS];
-	int contactBucketCap[B2_MAX_WORKERS];
+	// Per-block scratch for parallel FindParticleContacts. Steal still assigns
+	// unique blocks; merge concatenates by block index so contact order matches
+	// the serial i=0..n walk (not which pthread finished first).
+	lfParticleContact* contactBucket[LF_CONTACT_MAX_BLOCKS];
+	int contactBucketCount[LF_CONTACT_MAX_BLOCKS];
+	int contactBucketCap[LF_CONTACT_MAX_BLOCKS];
+	int contactBlockSize;
 	// SolveStaticPressure scratch: indices into particleContacts that qualify
 	// (either endpoint flagged lf_staticPressureParticle), compacted once per
 	// sub-step instead of re-filtering the full list every Poisson iteration.
@@ -393,6 +431,7 @@ static bool GroupIsValid( const lfParticleSystem* sys, lfParticleGroupId groupId
 // further down; CapturePairs runs at group-create time, not sub-step time,
 // but reuses the same grid buffers (see comment below).
 static void EnsureHashForCount( lfParticleSystem* sys );
+static void RotateBuffer( lfParticleSystem* sys, int start, int mid, int end );
 
 static void CapturePairs( lfParticleSystem* sys, int start, int n )
 {
@@ -495,6 +534,8 @@ lfParticleSystemDef lfDefaultParticleSystemDef( void )
 	def.staticPressureRelaxation = 0.2f;
 	def.staticPressureIterations = 8;
 	def.ejectionStrength = 0.5f;
+	def.colorMixingStrength = 0.5f;
+	def.repulsiveStrength = 1.0f;
 	def.maxParticles = 2048;
 	def.growable = true;
 	def.strictContactCheck = false;
@@ -507,6 +548,8 @@ lfParticleDef lfDefaultParticleDef( void )
 	def.flags = lf_waterParticle;
 	def.position = ( b2Vec2 ){ 0.0f, 0.0f };
 	def.velocity = ( b2Vec2 ){ 0.0f, 0.0f };
+	def.userData = 0;
+	def.color = 0;
 	return def;
 }
 
@@ -527,6 +570,8 @@ lfParticleGroupDef lfDefaultParticleGroupDef( void )
 	def.lifetimeMin = 0.0f;
 	def.lifetimeMax = 0.0f; // <= 0 => no age-based destruction (default)
 	def.fadeToAlpha0 = 0;	// opaque until destroy unless caller opts in
+	def.userData = 0;
+	def.color = 0;
 	return def;
 }
 
@@ -570,6 +615,8 @@ static bool EnsureCapacity( lfParticleSystem* sys, int minCapacity )
 	sys->totalLife = (float*)realloc( sys->totalLife, (size_t)newCapacity * sizeof( float ) );
 	sys->renderAlpha = (float*)realloc( sys->renderAlpha, (size_t)newCapacity * sizeof( float ) );
 	sys->viscousScale = (float*)realloc( sys->viscousScale, (size_t)newCapacity * sizeof( float ) );
+	sys->userData = (uint32_t*)realloc( sys->userData, (size_t)newCapacity * sizeof( uint32_t ) );
+	sys->color = (uint32_t*)realloc( sys->color, (size_t)newCapacity * sizeof( uint32_t ) );
 	sys->staticPressure = (float*)realloc( sys->staticPressure, (size_t)newCapacity * sizeof( float ) );
 	sys->staticPressureAccum = (float*)realloc( sys->staticPressureAccum, (size_t)newCapacity * sizeof( float ) );
 	sys->accumulation2 = (b2Vec2*)realloc( sys->accumulation2, (size_t)newCapacity * sizeof( b2Vec2 ) );
@@ -648,6 +695,8 @@ lfParticleSystem* lfParticleSystem_Create( b2WorldId worldId, const lfParticleSy
 		sys->totalLife = (float*)malloc( (size_t)hint * sizeof( float ) );
 		sys->renderAlpha = (float*)malloc( (size_t)hint * sizeof( float ) );
 		sys->viscousScale = (float*)malloc( (size_t)hint * sizeof( float ) );
+		sys->userData = (uint32_t*)malloc( (size_t)hint * sizeof( uint32_t ) );
+		sys->color = (uint32_t*)malloc( (size_t)hint * sizeof( uint32_t ) );
 		sys->staticPressure = (float*)calloc( (size_t)hint, sizeof( float ) );
 		sys->staticPressureAccum = (float*)calloc( (size_t)hint, sizeof( float ) );
 		sys->accumulation2 = (b2Vec2*)calloc( (size_t)hint, sizeof( b2Vec2 ) );
@@ -703,6 +752,8 @@ void lfParticleSystem_Destroy( lfParticleSystem* sys )
 	free( sys->totalLife );
 	free( sys->renderAlpha );
 	free( sys->viscousScale );
+	free( sys->userData );
+	free( sys->color );
 	free( sys->staticPressure );
 	free( sys->staticPressureAccum );
 	free( sys->accumulation2 );
@@ -711,7 +762,7 @@ void lfParticleSystem_Destroy( lfParticleSystem* sys )
 	free( sys->particleContacts );
 	free( sys->staticPressureContactIndices );
 	free( sys->bodyContacts );
-	for ( int w = 0; w < B2_MAX_WORKERS; w++ )
+	for ( int w = 0; w < LF_CONTACT_MAX_BLOCKS; w++ )
 	{
 		free( sys->contactBucket[w] );
 	}
@@ -737,8 +788,8 @@ int lfParticleSystem_CreateParticle( lfParticleSystem* sys, const lfParticleDef*
 	int i = sys->count++;
 	sys->posX[i] = def->position.x;
 	sys->posY[i] = def->position.y;
-	sys->velX[i] = def->velocity.x;
-	sys->velY[i] = def->velocity.y;
+	sys->velX[i] = lfSanitizeFinite( def->velocity.x );
+	sys->velY[i] = lfSanitizeFinite( def->velocity.y );
 	sys->weight[i] = 0.0f;
 	sys->flags[i] = def->flags;
 	sys->flagOr |= def->flags;
@@ -754,6 +805,8 @@ int lfParticleSystem_CreateParticle( lfParticleSystem* sys, const lfParticleDef*
 	sys->totalLife[i] = 0.0f;
 	sys->renderAlpha[i] = 1.0f;
 	sys->viscousScale[i] = 1.0f;
+	sys->userData[i] = def->userData;
+	sys->color[i] = def->color != 0 ? def->color : 0xFF3399FFu;
 	return i;
 }
 
@@ -894,8 +947,10 @@ static void InitGroupFromRange( lfParticleSystem* sys, int gid, int start, int n
 	g->firstIndex = start;
 	g->lastIndex = start + n;
 	g->count = n;
-	g->linearVelocity = def->linearVelocity;
-	g->angularVelocity = def->angularVelocity;
+	b2Vec2 lin = { lfSanitizeFinite( def->linearVelocity.x ), lfSanitizeFinite( def->linearVelocity.y ) };
+	float omega = lfSanitizeFinite( def->angularVelocity );
+	g->linearVelocity = lin;
+	g->angularVelocity = omega;
 
 	if ( n <= 0 )
 	{
@@ -914,8 +969,8 @@ static void InitGroupFromRange( lfParticleSystem* sys, int gid, int start, int n
 	for ( int i = start; i < start + n; i++ )
 	{
 		b2Vec2 offset = sys->restOffset[i];
-		b2Vec2 spin = b2MulSV( def->angularVelocity, b2LeftPerp( offset ) );
-		{ b2Vec2 __v = b2Add( def->linearVelocity, spin ); sys->velX[i] = __v.x; sys->velY[i] = __v.y; }
+		b2Vec2 spin = b2MulSV( omega, b2LeftPerp( offset ) );
+		{ b2Vec2 __v = b2Add( lin, spin ); sys->velX[i] = __v.x; sys->velY[i] = __v.y; }
 	}
 
 	if ( ( g->groupFlags & lf_solidParticleGroup ) != 0 )
@@ -977,6 +1032,23 @@ static void StampViscousScaleRange( lfParticleSystem* sys, int start, int n, flo
 	}
 }
 
+static void StampUserDataRange( lfParticleSystem* sys, int start, int n, uint32_t userData )
+{
+	for ( int i = start; i < start + n; i++ )
+	{
+		sys->userData[i] = userData;
+	}
+}
+
+static void StampColorRange( lfParticleSystem* sys, int start, int n, uint32_t color )
+{
+	uint32_t c = color != 0 ? color : 0xFF3399FFu;
+	for ( int i = start; i < start + n; i++ )
+	{
+		sys->color[i] = c;
+	}
+}
+
 static int ShouldKeepGroup( const lfParticleGroupDef* def )
 {
 	if ( ( def->flags & ( lf_elasticParticle | lf_springParticle ) ) != 0 )
@@ -1015,6 +1087,8 @@ lfParticleGroupId lfParticleSystem_CreateParticleGroupBox( lfParticleSystem* sys
 	}
 	SeedLifespan( sys, start, n, local.lifetimeMin, local.lifetimeMax, local.fadeToAlpha0 );
 	StampViscousScaleRange( sys, start, n, local.viscousScale );
+	StampUserDataRange( sys, start, n, local.userData );
+	StampColorRange( sys, start, n, local.color );
 	if ( !ShouldKeepGroup( &local ) )
 	{
 		return LF_NULL_PARTICLE_GROUP;
@@ -1068,6 +1142,8 @@ lfParticleGroupId lfParticleSystem_CreateParticleGroupCircle( lfParticleSystem* 
 	SeedLifespan( sys, start, n, local.lifetimeMin, local.lifetimeMax, local.fadeToAlpha0 );
 	MaybeCapturePairs( sys, start, n, local.flags );
 	StampViscousScaleRange( sys, start, n, local.viscousScale );
+	StampUserDataRange( sys, start, n, local.userData );
+	StampColorRange( sys, start, n, local.color );
 	if ( !ShouldKeepGroup( &local ) )
 	{
 		return LF_NULL_PARTICLE_GROUP;
@@ -1208,6 +1284,251 @@ void lfParticleSystem_SetTuning( lfParticleSystem* sys, float dampingStrength, f
 	sys->def.staticPressureStrength = staticPressureStrength;
 	sys->def.staticPressureRelaxation = staticPressureRelaxation;
 	sys->def.staticPressureIterations = staticPressureIterations < 1 ? 1 : staticPressureIterations;
+}
+
+void lfParticleSystem_SetExtraTuning( lfParticleSystem* sys, float ejectionStrength, float colorMixingStrength,
+										 float repulsiveStrength )
+{
+	if ( sys == NULL )
+	{
+		return;
+	}
+	sys->def.ejectionStrength = ejectionStrength;
+	sys->def.colorMixingStrength = colorMixingStrength;
+	sys->def.repulsiveStrength = repulsiveStrength;
+}
+
+static int ParticleIndexInRange( const lfParticleSystem* sys, int index )
+{
+	return sys != NULL && index >= 0 && index < sys->count;
+}
+
+void lfParticleSystem_SetParticleFlags( lfParticleSystem* sys, int index, uint32_t flags )
+{
+	if ( !ParticleIndexInRange( sys, index ) )
+	{
+		return;
+	}
+	sys->flags[index] = flags;
+	sys->flagOr |= flags;
+}
+
+void lfParticleSystem_SetParticleViscousScale( lfParticleSystem* sys, int index, float scale )
+{
+	if ( !ParticleIndexInRange( sys, index ) )
+	{
+		return;
+	}
+	sys->viscousScale[index] = scale > 0.0f ? scale : 1.0f;
+}
+
+void lfParticleSystem_SetParticleViscousScaleRange( lfParticleSystem* sys, int firstIndex, int lastIndex, float scale )
+{
+	if ( sys == NULL || firstIndex < 0 || lastIndex > sys->count || firstIndex >= lastIndex )
+	{
+		return;
+	}
+	float s = scale > 0.0f ? scale : 1.0f;
+	for ( int i = firstIndex; i < lastIndex; i++ )
+	{
+		sys->viscousScale[i] = s;
+	}
+}
+
+void lfParticleSystem_SetParticleUserData( lfParticleSystem* sys, int index, uint32_t userData )
+{
+	if ( !ParticleIndexInRange( sys, index ) )
+	{
+		return;
+	}
+	sys->userData[index] = userData;
+}
+
+void lfParticleSystem_SetParticleUserDataRange( lfParticleSystem* sys, int firstIndex, int lastIndex,
+												 uint32_t userData )
+{
+	if ( sys == NULL || firstIndex < 0 || lastIndex > sys->count || firstIndex >= lastIndex )
+	{
+		return;
+	}
+	for ( int i = firstIndex; i < lastIndex; i++ )
+	{
+		sys->userData[i] = userData;
+	}
+}
+
+void lfParticleSystem_SetParticleColor( lfParticleSystem* sys, int index, uint32_t color )
+{
+	if ( !ParticleIndexInRange( sys, index ) )
+	{
+		return;
+	}
+	sys->color[index] = color != 0 ? color : 0xFF3399FFu;
+}
+
+void lfParticleSystem_SetParticleColorRange( lfParticleSystem* sys, int firstIndex, int lastIndex, uint32_t color )
+{
+	if ( sys == NULL || firstIndex < 0 || lastIndex > sys->count || firstIndex >= lastIndex )
+	{
+		return;
+	}
+	uint32_t c = color != 0 ? color : 0xFF3399FFu;
+	for ( int i = firstIndex; i < lastIndex; i++ )
+	{
+		sys->color[i] = c;
+	}
+}
+
+static int CompareIntDescending( const void* a, const void* b )
+{
+	int ia = *(const int*)a;
+	int ib = *(const int*)b;
+	return ( ib > ia ) - ( ib < ia );
+}
+
+lfParticleGroupId lfParticleSystem_ExtractParticles( lfParticleSystem* sys, lfParticleGroupId groupId,
+													   const int* indices, int count, uint32_t groupFlags,
+													   int trackGroup )
+{
+	(void)trackGroup;
+	if ( sys == NULL || indices == NULL || count <= 0 || !GroupIsValid( sys, groupId ) )
+	{
+		return LF_NULL_PARTICLE_GROUP;
+	}
+
+	lfParticleGroup* g = &sys->groups[groupId];
+	int first = g->firstIndex;
+	int last = g->lastIndex;
+	if ( last <= first )
+	{
+		return LF_NULL_PARTICLE_GROUP;
+	}
+
+	int* list = (int*)malloc( (size_t)count * sizeof( int ) );
+	if ( list == NULL )
+	{
+		return LF_NULL_PARTICLE_GROUP;
+	}
+
+	int n = 0;
+	for ( int i = 0; i < count; i++ )
+	{
+		int idx = indices[i];
+		if ( idx < first || idx >= last )
+		{
+			continue;
+		}
+		if ( sys->groupIndex[idx] != groupId )
+		{
+			continue;
+		}
+		if ( ( sys->flags[idx] & lf_zombieParticle ) != 0 )
+		{
+			continue;
+		}
+		list[n++] = idx;
+	}
+
+	if ( n <= 0 )
+	{
+		free( list );
+		return LF_NULL_PARTICLE_GROUP;
+	}
+
+	qsort( list, (size_t)n, sizeof( int ), CompareIntDescending );
+	int w = 1;
+	for ( int i = 1; i < n; i++ )
+	{
+		if ( list[i] != list[w - 1] )
+		{
+			list[w++] = list[i];
+		}
+	}
+	n = w;
+
+	uint32_t savedFlags = g->flags;
+	float savedStrength = g->strength;
+	float savedViscous = g->viscousScale;
+	int origCount = g->count;
+	int origFirst = first;
+	int origLast = last;
+
+	int newGid = AllocGroup( sys );
+	if ( newGid < 0 )
+	{
+		free( list );
+		return LF_NULL_PARTICLE_GROUP;
+	}
+	// AllocGroup may realloc sys->groups.
+	g = &sys->groups[groupId];
+
+	int extractStart;
+	int extractCount = n;
+
+	if ( n >= origCount )
+	{
+		extractStart = origFirst;
+		extractCount = origCount;
+		g->firstIndex = 0;
+		g->lastIndex = 0;
+		g->count = 0;
+	}
+	else
+	{
+		int end = origLast;
+		for ( int i = 0; i < n; i++ )
+		{
+			int idx = list[i];
+			RotateBuffer( sys, idx, idx + 1, end );
+			end--;
+		}
+		// RotateBuffer remaps every group's first/last as if the rotate were a
+		// Join/compact of that group. Extract only shuffles inside [origFirst, origLast):
+		// remaining particles pack at origFirst, extracted sit at [end, origLast).
+		// Restore the source range or extracting the front/middle zeros the slab
+		// (firstIndex jumps) and the next Step OOBs.
+		g = &sys->groups[groupId];
+		g->firstIndex = origFirst;
+		g->lastIndex = end;
+		g->count = end - origFirst;
+		extractStart = end;
+		extractCount = origLast - end;
+		if ( g->count > 0 )
+		{
+			RebuildGroupRestFromPositions( sys, g );
+			if ( ( g->groupFlags & lf_solidParticleGroup ) != 0 )
+			{
+				g->groupFlags |= lf_particleGroupNeedsUpdateDepth;
+			}
+		}
+	}
+
+	free( list );
+
+	g = &sys->groups[groupId];
+	if ( g->count <= 0 )
+	{
+		g->firstIndex = 0;
+		g->lastIndex = 0;
+		if ( ( g->groupFlags & lf_particleGroupCanBeEmpty ) == 0 )
+		{
+			g->alive = false;
+		}
+	}
+
+	lfParticleGroupDef gdef = lfDefaultParticleGroupDef();
+	gdef.flags = savedFlags;
+	gdef.groupFlags = groupFlags;
+	gdef.strength = savedStrength;
+	gdef.viscousScale = savedViscous;
+	gdef.trackGroup = 1;
+	InitGroupFromRange( sys, newGid, extractStart, extractCount, &gdef );
+	if ( IsShapeGroupFlags( savedFlags ) )
+	{
+		sys->hasShapeGroups = true;
+	}
+	sys->allGroupFlags |= groupFlags;
+	return newGid;
 }
 
 static void UpdateGroupStatistics( lfParticleSystem* sys )
@@ -1410,6 +1731,8 @@ static void CopyParticle( lfParticleSystem* sys, int dst, int src )
 	sys->totalLife[dst] = sys->totalLife[src];
 	sys->renderAlpha[dst] = sys->renderAlpha[src];
 	sys->viscousScale[dst] = sys->viscousScale[src];
+	sys->userData[dst] = sys->userData[src];
+	sys->color[dst] = sys->color[src];
 }
 
 static int RotateIndex( int i, int start, int mid, int end )
@@ -1535,6 +1858,8 @@ static void RotateBuffer( lfParticleSystem* sys, int start, int mid, int end )
 	RotateTyped( sys->totalLife, sizeof( float ), start, mid, end );
 	RotateTyped( sys->renderAlpha, sizeof( float ), start, mid, end );
 	RotateTyped( sys->viscousScale, sizeof( float ), start, mid, end );
+	RotateTyped( sys->userData, sizeof( uint32_t ), start, mid, end );
+	RotateTyped( sys->color, sizeof( uint32_t ), start, mid, end );
 
 	for ( int k = 0; k < sys->pairCount; k++ )
 	{
@@ -1706,9 +2031,6 @@ static void BuildGrid( lfParticleSystem* sys )
 	}
 }
 
-#define LF_CONTACT_PARALLEL_MIN 4096
-#define LF_CONTACT_MIN_RANGE 256
-
 static float lfInvSqrt( float x )
 {
 	float inv = _mm_cvtss_f32( _mm_rsqrt_ss( _mm_set_ss( x ) ) );
@@ -1742,18 +2064,18 @@ static void PushParticleContact( lfParticleSystem* sys, int a, int b, b2Vec2 nor
 	c->weight = weight;
 }
 
-static void PushContactBucket( lfParticleSystem* sys, int workerIndex, int a, int b, b2Vec2 normal, float weight )
+static void PushContactBucket( lfParticleSystem* sys, int blockIndex, int a, int b, b2Vec2 normal, float weight )
 {
-	int* count = &sys->contactBucketCount[workerIndex];
-	int* cap = &sys->contactBucketCap[workerIndex];
+	int* count = &sys->contactBucketCount[blockIndex];
+	int* cap = &sys->contactBucketCap[blockIndex];
 	if ( *count == *cap )
 	{
 		int next = *cap < 256 ? 256 : *cap * 2;
-		sys->contactBucket[workerIndex] =
-			(lfParticleContact*)realloc( sys->contactBucket[workerIndex], (size_t)next * sizeof( lfParticleContact ) );
+		sys->contactBucket[blockIndex] =
+			(lfParticleContact*)realloc( sys->contactBucket[blockIndex], (size_t)next * sizeof( lfParticleContact ) );
 		*cap = next;
 	}
-	lfParticleContact* c = &sys->contactBucket[workerIndex][( *count )++];
+	lfParticleContact* c = &sys->contactBucket[blockIndex][( *count )++];
 	c->a = (uint16_t)a;
 	c->b = (uint16_t)b;
 	c->normal = normal;
@@ -1762,11 +2084,14 @@ static void PushContactBucket( lfParticleSystem* sys, int workerIndex, int a, in
 
 static void FindContactsRange( int start, int end, int workerIndex, void* context )
 {
+	(void)workerIndex;
 	lfParticleSystem* sys = (lfParticleSystem*)context;
 	const float squaredDiameter = sys->diameter * sys->diameter;
 	const float invDiameter = sys->invDiameter;
 	const float* posX = sys->posX;
 	const float* posY = sys->posY;
+	const int blockSize = sys->contactBlockSize;
+	const int blockIndex = blockSize > 0 ? start / blockSize : 0;
 
 	for ( int i = start; i < end; i++ )
 	{
@@ -1791,7 +2116,7 @@ static void FindContactsRange( int start, int end, int workerIndex, void* contex
 						float invD = lfInvSqrt( distSqr );
 						b2Vec2 normal = { ddx * invD, ddy * invD };
 						float weight = 1.0f - distSqr * invD * invDiameter;
-						PushContactBucket( sys, workerIndex, i, (int)j, normal, weight );
+						PushContactBucket( sys, blockIndex, i, (int)j, normal, weight );
 					}
 				}
 			}
@@ -1799,16 +2124,16 @@ static void FindContactsRange( int start, int end, int workerIndex, void* contex
 	}
 }
 
-static void MergeContactBuckets( lfParticleSystem* sys, int workerCount )
+static void MergeContactBuckets( lfParticleSystem* sys, int blockCount )
 {
 	int total = 0;
-	for ( int w = 0; w < workerCount; w++ )
+	for ( int w = 0; w < blockCount; w++ )
 	{
 		total += sys->contactBucketCount[w];
 	}
 	GrowParticleContactCap( sys, total );
 	sys->particleContactCount = 0;
-	for ( int w = 0; w < workerCount; w++ )
+	for ( int w = 0; w < blockCount; w++ )
 	{
 		int n = sys->contactBucketCount[w];
 		if ( n <= 0 )
@@ -1863,13 +2188,17 @@ static void FindParticleContacts( lfParticleSystem* sys )
 		return;
 	}
 
-	const int workerCount = g_lfWorkerCount;
-	for ( int w = 0; w < workerCount; w++ )
+	int blockSize;
+	int blockCount;
+	lfParallelForPlan( n, LF_CONTACT_MIN_RANGE, &blockSize, &blockCount );
+	sys->contactBlockSize = blockSize;
+	for ( int w = 0; w < blockCount; w++ )
 	{
 		sys->contactBucketCount[w] = 0;
 	}
 	lfParallelFor( &FindContactsRange, n, LF_CONTACT_MIN_RANGE, sys );
-	MergeContactBuckets( sys, workerCount );
+	MergeContactBuckets( sys, blockCount );
+	sys->contactBlockSize = 0;
 }
 
 // ------------------------------------------------------------------------
@@ -2929,6 +3258,166 @@ static void SolvePowder( lfParticleSystem* sys, float dt )
 	}
 }
 
+// Color mix / repulsive / reactive: algorithm from LiquidFun 1.1.0
+// (google/liquidfun b2ParticleSystem.cpp). Not a paste of that C++.
+
+static void MixPackedColors( uint32_t* colorA, uint32_t* colorB, int strength )
+{
+	int ar = (int)( ( *colorA >> 16 ) & 255 );
+	int ag = (int)( ( *colorA >> 8 ) & 255 );
+	int ab = (int)( *colorA & 255 );
+	int aa = (int)( ( *colorA >> 24 ) & 255 );
+	int br = (int)( ( *colorB >> 16 ) & 255 );
+	int bg = (int)( ( *colorB >> 8 ) & 255 );
+	int bb = (int)( *colorB & 255 );
+	int ba = (int)( ( *colorB >> 24 ) & 255 );
+	int dr = ( strength * ( br - ar ) ) >> 8;
+	int dg = ( strength * ( bg - ag ) ) >> 8;
+	int db = ( strength * ( bb - ab ) ) >> 8;
+	int da = ( strength * ( ba - aa ) ) >> 8;
+	ar = ( ar + dr ) & 255;
+	ag = ( ag + dg ) & 255;
+	ab = ( ab + db ) & 255;
+	aa = ( aa + da ) & 255;
+	br = ( br - dr ) & 255;
+	bg = ( bg - dg ) & 255;
+	bb = ( bb - db ) & 255;
+	ba = ( ba - da ) & 255;
+	*colorA = ( (uint32_t)aa << 24 ) | ( (uint32_t)ar << 16 ) | ( (uint32_t)ag << 8 ) | (uint32_t)ab;
+	*colorB = ( (uint32_t)ba << 24 ) | ( (uint32_t)br << 16 ) | ( (uint32_t)bg << 8 ) | (uint32_t)bb;
+}
+
+static void SolveColorMixing( lfParticleSystem* sys )
+{
+	if ( ( sys->flagOr & lf_colorMixingParticle ) == 0 )
+	{
+		return;
+	}
+	int colorMixing128 = (int)( 128.0f * sys->def.colorMixingStrength );
+	if ( colorMixing128 == 0 )
+	{
+		return;
+	}
+	for ( int idx = 0; idx < sys->particleContactCount; idx++ )
+	{
+		const lfParticleContact* c = &sys->particleContacts[idx];
+		if ( ( sys->flags[c->a] & sys->flags[c->b] & lf_colorMixingParticle ) == 0 )
+		{
+			continue;
+		}
+		MixPackedColors( &sys->color[c->a], &sys->color[c->b], colorMixing128 );
+	}
+}
+
+static void SolveRepulsive( lfParticleSystem* sys, float dt )
+{
+	if ( ( sys->flagOr & lf_repulsiveParticle ) == 0 || dt <= 1e-12f )
+	{
+		return;
+	}
+	float repulsiveStrength = sys->def.repulsiveStrength * ( sys->diameter / dt );
+	for ( int idx = 0; idx < sys->particleContactCount; idx++ )
+	{
+		const lfParticleContact* c = &sys->particleContacts[idx];
+		if ( ( ( sys->flags[c->a] | sys->flags[c->b] ) & lf_repulsiveParticle ) == 0 )
+		{
+			continue;
+		}
+		if ( sys->groupIndex[c->a] == sys->groupIndex[c->b] )
+		{
+			continue;
+		}
+		b2Vec2 f = b2MulSV( repulsiveStrength * c->weight, c->normal );
+		{ b2Vec2 __v = b2Sub( ( (b2Vec2){ sys->velX[c->a], sys->velY[c->a] } ), f ); sys->velX[c->a] = __v.x; sys->velY[c->a] = __v.y; }
+		{ b2Vec2 __v = b2Add( ( (b2Vec2){ sys->velX[c->b], sys->velY[c->b] } ), f ); sys->velX[c->b] = __v.x; sys->velY[c->b] = __v.y; }
+	}
+}
+
+static int ParticleCanBeConnected( const lfParticleSystem* sys, int index )
+{
+	uint32_t flags = sys->flags[index];
+	if ( ( flags & ( lf_wallParticle | lf_springParticle | lf_elasticParticle ) ) != 0 )
+	{
+		return 1;
+	}
+	int gid = sys->groupIndex[index];
+	return GroupIsValid( sys, gid ) && ( sys->groups[gid].groupFlags & lf_rigidParticleGroup ) != 0;
+}
+
+static int PairExists( const lfParticleSystem* sys, uint16_t a, uint16_t b )
+{
+	for ( int k = 0; k < sys->pairCount; k++ )
+	{
+		uint16_t pa = sys->pairs[k].a;
+		uint16_t pb = sys->pairs[k].b;
+		if ( ( pa == a && pb == b ) || ( pa == b && pb == a ) )
+		{
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static void SolveReactive( lfParticleSystem* sys )
+{
+	if ( ( sys->flagOr & lf_reactiveParticle ) == 0 )
+	{
+		return;
+	}
+	for ( int idx = 0; idx < sys->particleContactCount; idx++ )
+	{
+		const lfParticleContact* c = &sys->particleContacts[idx];
+		uint32_t af = sys->flags[c->a];
+		uint32_t bf = sys->flags[c->b];
+		if ( ( ( af | bf ) & lf_zombieParticle ) != 0 )
+		{
+			continue;
+		}
+		if ( ( ( af | bf ) & LF_PAIR_CAPTURE_FLAGS ) == 0 )
+		{
+			continue;
+		}
+		if ( ( ( af | bf ) & lf_reactiveParticle ) == 0 )
+		{
+			continue;
+		}
+		if ( !ParticleCanBeConnected( sys, c->a ) || !ParticleCanBeConnected( sys, c->b ) )
+		{
+			continue;
+		}
+		if ( PairExists( sys, c->a, c->b ) )
+		{
+			continue;
+		}
+		if ( sys->pairCount == sys->pairCapacity )
+		{
+			sys->pairCapacity = sys->pairCapacity > 0 ? sys->pairCapacity * 2 : 256;
+			sys->pairs = (lfParticlePair*)realloc( sys->pairs, (size_t)sys->pairCapacity * sizeof( lfParticlePair ) );
+			if ( sys->pairs == NULL )
+			{
+				break;
+			}
+		}
+		lfParticlePair* p = &sys->pairs[sys->pairCount++];
+		p->a = c->a;
+		p->b = c->b;
+		p->flags = ( af | bf ) & LF_PAIR_CAPTURE_FLAGS;
+		b2Vec2 delta = b2Sub( ( (b2Vec2){ sys->posX[c->b], sys->posY[c->b] } ),
+							  ( (b2Vec2){ sys->posX[c->a], sys->posY[c->a] } ) );
+		p->distance = sqrtf( b2LengthSquared( delta ) );
+		int ga = sys->groupIndex[c->a];
+		int gb = sys->groupIndex[c->b];
+		float sa = GroupIsValid( sys, ga ) ? sys->groups[ga].strength : 1.0f;
+		float sb = GroupIsValid( sys, gb ) ? sys->groups[gb].strength : 1.0f;
+		p->strength = sa < sb ? sa : sb;
+	}
+	for ( int i = 0; i < sys->count; i++ )
+	{
+		sys->flags[i] &= ~lf_reactiveParticle;
+	}
+	sys->flagOr &= ~lf_reactiveParticle;
+}
+
 // ------------------------------------------------------------------------
 // Public step function
 // ------------------------------------------------------------------------
@@ -3211,6 +3700,8 @@ void lfParticleSystem_SplitParticleGroup( lfParticleSystem* sys, lfParticleGroup
 			}
 			sys->restOffset[dst] = sys->restOffset[src];
 			sys->viscousScale[dst] = sys->viscousScale[src];
+			sys->userData[dst] = sys->userData[src];
+			sys->color[dst] = sys->color[src];
 			sys->remainingLife[dst] = sys->remainingLife[src];
 			sys->totalLife[dst] = sys->totalLife[src];
 			sys->renderAlpha[dst] = sys->renderAlpha[src];
@@ -3605,14 +4096,20 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 		ComputeWeight( sys );
 		ComputeDepth( sys );
 
+		if ( sys->flagOr & lf_reactiveParticle )
+		{
+			SolveReactive( sys );
+		}
 		SolveForce( sys, subDt );
 		SolveViscous( sys );
+		SolveRepulsive( sys, subDt );
 		SolvePowder( sys, subDt );
 		SolveTensile( sys, subDt );
 		if ( ( sys->allGroupFlags & lf_solidParticleGroup ) != 0 )
 		{
 			SolveSolid( sys, subDt );
 		}
+		SolveColorMixing( sys );
 		SolveGravity( sys, subDt );
 		SolveStaticPressure( sys, subDt );
 		SolvePressure( sys, subDt );
@@ -3688,7 +4185,17 @@ const float* lfParticleSystem_GetAlphaBuffer( const lfParticleSystem* sys )
 
 const float* lfParticleSystem_GetViscousScaleBuffer( const lfParticleSystem* sys )
 {
-	return sys->viscousScale;
+	return sys != NULL ? sys->viscousScale : NULL;
+}
+
+const uint32_t* lfParticleSystem_GetUserDataBuffer( const lfParticleSystem* sys )
+{
+	return sys != NULL ? sys->userData : NULL;
+}
+
+const uint32_t* lfParticleSystem_GetColorBuffer( const lfParticleSystem* sys )
+{
+	return sys != NULL ? sys->color : NULL;
 }
 
 const int* lfParticleSystem_GetGroupIndexBuffer( const lfParticleSystem* sys )
@@ -3708,7 +4215,8 @@ int lfParticleSystem_GetPairCount( const lfParticleSystem* sys )
 
 int lfParticleSystem_SyncActiveGroups( const lfParticleSystem* sys, int* idOut, int* countOut, int* firstOut,
 										int* lastOut, float* viscOut, float* xOut, float* yOut, float* vxOut,
-										float* vyOut, float* angVelOut, float* angleOut, int maxGroups )
+										float* vyOut, float* angVelOut, float* angleOut, uint32_t* groupFlagsOut,
+										int maxGroups )
 {
 	if ( sys == NULL || maxGroups <= 0 )
 	{
@@ -3765,6 +4273,10 @@ int lfParticleSystem_SyncActiveGroups( const lfParticleSystem* sys, int* idOut, 
 		if ( angleOut )
 		{
 			angleOut[w] = g->angle;
+		}
+		if ( groupFlagsOut )
+		{
+			groupFlagsOut[w] = g->groupFlags & ~lf_particleGroupInternalMask;
 		}
 		w++;
 	}

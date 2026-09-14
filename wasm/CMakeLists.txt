@@ -7,7 +7,7 @@ set(BOX2D_UNIT_TESTS OFF CACHE BOOL "" FORCE)
 set(BOX2D_VALIDATE OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 
-# OFF = lab demo (physics_post.js). ON = WeedJS (weed_post.js → importScripts weedjs_post.js).
+# OFF = lab demo (physics_post.js). ON = WeedJS (weed_post.js → importScripts weedjsPost.js).
 option(BOX2D_WEED_INTEGRATION "Build post-js for WeedJS multithreadad-game-engine" OFF)
 
 # Box2D solver worker count ceiling; must match -sPTHREAD_POOL_SIZE and wasm_wrapper clamp.
@@ -98,8 +98,14 @@ else()
 	set(BOX2D_WASM_OUT_DIR "${CMAKE_SOURCE_DIR}/../demo")
 endif()
 
+if(BOX2D_WEED_INTEGRATION)
+	set(BOX2D_WASM_OUTPUT_NAME "box2dWasm")
+else()
+	set(BOX2D_WASM_OUTPUT_NAME "box2d_wasm")
+endif()
+
 set_target_properties(box2d_wasm PROPERTIES
-	OUTPUT_NAME "box2d_wasm"
+	OUTPUT_NAME "${BOX2D_WASM_OUTPUT_NAME}"
 	SUFFIX ".js"
 	RUNTIME_OUTPUT_DIRECTORY "${BOX2D_WASM_OUT_DIR}"
 )
