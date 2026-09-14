@@ -48,6 +48,29 @@
 #define LF_CONTACT_BLOCKS_PER_WORKER 4
 #define LF_CONTACT_MAX_BLOCKS ( LF_CONTACT_BLOCKS_PER_WORKER * B2_MAX_WORKERS )
 
+#define LF_PASS_COUNT 8
+#define LF_PASS_GRID 0
+#define LF_PASS_FIND_CONTACTS 1
+#define LF_PASS_BODY 2
+#define LF_PASS_WEIGHT 3
+#define LF_PASS_STATIC_PRESSURE 4
+#define LF_PASS_PRESSURE 5
+#define LF_PASS_CONTACT_SOLVERS 6
+#define LF_PASS_REST 7
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
+
+static double LfNowMs( void )
+{
+#ifdef __EMSCRIPTEN__
+	return emscripten_get_now();
+#else
+	return 0.0;
+#endif
+}
+
 // WASM/JS omitted f32 args become NaN (not 0). -ffast-math kills isfinite().
 static float lfSanitizeFinite( float v )
 {
@@ -398,7 +421,20 @@ struct lfParticleSystem
 	int skipBodyImpulse;
 	int skipBodyVelocity;
 	int reuseQueryAcrossSubsteps;
+	int reuseParticleContacts;
+	int skipPassMask;
+	float passMs[LF_PASS_COUNT];
 };
+
+static void LfAccPass( lfParticleSystem* sys, int id, double t0 )
+{
+	sys->passMs[id] += (float)( LfNowMs() - t0 );
+}
+
+static int LfSkipPass( const lfParticleSystem* sys, int id )
+{
+	return ( sys->skipPassMask & ( 1 << id ) ) != 0;
+}
 
 // ------------------------------------------------------------------------
 // Small helpers
@@ -4639,6 +4675,10 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 	sys->applyImpulseCalls = 0;
 	sys->worldPointVelocityCalls = 0;
 	sys->bodyPropCalls = 0;
+	for ( int i = 0; i < LF_PASS_COUNT; i++ )
+	{
+		sys->passMs[i] = 0.0f;
+	}
 	if ( sys->count == 0 )
 	{
 		return;
@@ -4648,8 +4688,15 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 		subStepCount = 1;
 	}
 
-	SolveLifetime( sys, dt );
-	SolveZombie( sys );
+	{
+		double t0 = LfNowMs();
+		if ( !LfSkipPass( sys, LF_PASS_REST ) )
+		{
+			SolveLifetime( sys, dt );
+			SolveZombie( sys );
+		}
+		LfAccPass( sys, LF_PASS_REST, t0 );
+	}
 	if ( sys->count == 0 )
 	{
 		return;
@@ -4665,63 +4712,167 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 
 	for ( int step = 0; step < subStepCount; step++ )
 	{
-		BuildGrid( sys );
-		FindParticleContacts( sys );
+		{
+			double t0 = LfNowMs();
+			if ( !LfSkipPass( sys, LF_PASS_GRID ) )
+			{
+				BuildGrid( sys );
+			}
+			LfAccPass( sys, LF_PASS_GRID, t0 );
+		}
+		{
+			double t0 = LfNowMs();
+			if ( !LfSkipPass( sys, LF_PASS_FIND_CONTACTS ) && !sys->reuseParticleContacts )
+			{
+				FindParticleContacts( sys );
+			}
+			LfAccPass( sys, LF_PASS_FIND_CONTACTS, t0 );
+		}
 		// One shared broad-phase query for both FindBodyContacts (below) and
 		// SolveCollision (later this sub-step) - swept-cloud AABB is a proven
 		// superset of the static-cloud AABB FindBodyContacts alone would need.
 		// H14 (opt-in): query once with full dt on sub-step 0, reuse queryShapes.
-		if ( step == 0 || !sys->reuseQueryAcrossSubsteps )
 		{
-			CollectOverlappingShapes( sys, ComputeSweptCloudAABB( sys, queryDt, sys->diameter ) );
+			double t0 = LfNowMs();
+			if ( !LfSkipPass( sys, LF_PASS_BODY ) )
+			{
+				if ( step == 0 || !sys->reuseQueryAcrossSubsteps )
+				{
+					CollectOverlappingShapes( sys, ComputeSweptCloudAABB( sys, queryDt, sys->diameter ) );
+				}
+				FindBodyContacts( sys );
+				if ( sys->def.strictContactCheck )
+				{
+					RemoveSpuriousBodyContacts( sys );
+				}
+			}
+			LfAccPass( sys, LF_PASS_BODY, t0 );
 		}
-		FindBodyContacts( sys );
-		if ( sys->def.strictContactCheck )
 		{
-			RemoveSpuriousBodyContacts( sys );
+			double t0 = LfNowMs();
+			if ( !LfSkipPass( sys, LF_PASS_WEIGHT ) )
+			{
+				ComputeWeight( sys );
+			}
+			LfAccPass( sys, LF_PASS_WEIGHT, t0 );
 		}
-		ComputeWeight( sys );
-		ComputeDepth( sys );
-
-		if ( sys->flagOr & lf_reactiveParticle )
 		{
-			SolveReactive( sys );
+			double t0 = LfNowMs();
+			if ( !LfSkipPass( sys, LF_PASS_REST ) )
+			{
+				ComputeDepth( sys );
+				if ( sys->flagOr & lf_reactiveParticle )
+				{
+					SolveReactive( sys );
+				}
+			}
+			LfAccPass( sys, LF_PASS_REST, t0 );
 		}
-		SolveForce( sys, subDt );
-		SolveViscous( sys );
-		SolveRepulsive( sys, subDt );
-		SolvePowder( sys, subDt );
-		SolveTensile( sys, subDt );
-		if ( ( sys->allGroupFlags & lf_solidParticleGroup ) != 0 )
 		{
-			SolveSolid( sys, subDt );
+			double t0 = LfNowMs();
+			if ( !LfSkipPass( sys, LF_PASS_CONTACT_SOLVERS ) )
+			{
+				SolveForce( sys, subDt );
+				SolveViscous( sys );
+				SolveRepulsive( sys, subDt );
+				SolvePowder( sys, subDt );
+				SolveTensile( sys, subDt );
+			}
+			LfAccPass( sys, LF_PASS_CONTACT_SOLVERS, t0 );
 		}
-		SolveColorMixing( sys );
-		SolveGravity( sys, subDt );
-		SolveStaticPressure( sys, subDt );
-		SolvePressure( sys, subDt );
-		SolveDamping( sys, subDt );
-		if ( sys->hasShapeGroups ||
-			 ( sys->allGroupFlags & ( lf_rigidParticleGroup | lf_solidParticleGroup ) ) != 0 )
 		{
-			UpdateGroupStatistics( sys );
-			SolveElastic( sys, subDt );
-			SolveSpring( sys, subDt );
+			double t0 = LfNowMs();
+			if ( !LfSkipPass( sys, LF_PASS_REST ) )
+			{
+				if ( ( sys->allGroupFlags & lf_solidParticleGroup ) != 0 )
+				{
+					SolveSolid( sys, subDt );
+				}
+				SolveColorMixing( sys );
+				SolveGravity( sys, subDt );
+			}
+			LfAccPass( sys, LF_PASS_REST, t0 );
 		}
-		LimitVelocity( sys, subDt );
-		if ( ( sys->allGroupFlags & lf_rigidParticleGroup ) != 0 )
 		{
-			UpdateGroupStatistics( sys );
-			SolveRigidDamping( sys );
+			double t0 = LfNowMs();
+			if ( !LfSkipPass( sys, LF_PASS_STATIC_PRESSURE ) )
+			{
+				SolveStaticPressure( sys, subDt );
+			}
+			LfAccPass( sys, LF_PASS_STATIC_PRESSURE, t0 );
 		}
-		SolveBarrier( sys, subDt );
-		SolveCollision( sys, subDt );
-		if ( ( sys->allGroupFlags & lf_rigidParticleGroup ) != 0 )
 		{
-			SolveRigid( sys, subDt );
+			double t0 = LfNowMs();
+			if ( !LfSkipPass( sys, LF_PASS_PRESSURE ) )
+			{
+				SolvePressure( sys, subDt );
+			}
+			LfAccPass( sys, LF_PASS_PRESSURE, t0 );
 		}
-		SolveWall( sys );
-		Integrate( sys, subDt );
+		{
+			double t0 = LfNowMs();
+			if ( !LfSkipPass( sys, LF_PASS_CONTACT_SOLVERS ) )
+			{
+				SolveDamping( sys, subDt );
+			}
+			LfAccPass( sys, LF_PASS_CONTACT_SOLVERS, t0 );
+		}
+		{
+			double t0 = LfNowMs();
+			if ( !LfSkipPass( sys, LF_PASS_REST ) )
+			{
+				if ( sys->hasShapeGroups ||
+					 ( sys->allGroupFlags & ( lf_rigidParticleGroup | lf_solidParticleGroup ) ) != 0 )
+				{
+					UpdateGroupStatistics( sys );
+					SolveElastic( sys, subDt );
+					SolveSpring( sys, subDt );
+				}
+				LimitVelocity( sys, subDt );
+				if ( ( sys->allGroupFlags & lf_rigidParticleGroup ) != 0 )
+				{
+					UpdateGroupStatistics( sys );
+					SolveRigidDamping( sys );
+				}
+			}
+			LfAccPass( sys, LF_PASS_REST, t0 );
+		}
+		{
+			double t0 = LfNowMs();
+			if ( !LfSkipPass( sys, LF_PASS_BODY ) )
+			{
+				SolveBarrier( sys, subDt );
+				SolveCollision( sys, subDt );
+			}
+			LfAccPass( sys, LF_PASS_BODY, t0 );
+		}
+		{
+			double t0 = LfNowMs();
+			if ( !LfSkipPass( sys, LF_PASS_REST ) )
+			{
+				if ( ( sys->allGroupFlags & lf_rigidParticleGroup ) != 0 )
+				{
+					SolveRigid( sys, subDt );
+				}
+			}
+			LfAccPass( sys, LF_PASS_REST, t0 );
+		}
+		{
+			double t0 = LfNowMs();
+			if ( !LfSkipPass( sys, LF_PASS_BODY ) )
+			{
+				SolveWall( sys );
+			}
+			LfAccPass( sys, LF_PASS_BODY, t0 );
+		}
+		{
+			double t0 = LfNowMs();
+			if ( !LfSkipPass( sys, LF_PASS_REST ) )
+			{
+				Integrate( sys, subDt );
+			}
+			LfAccPass( sys, LF_PASS_REST, t0 );
+		}
 	}
 
 }
@@ -4785,6 +4936,44 @@ void lfParticleSystem_SetReuseQueryAcrossSubsteps( lfParticleSystem* sys, int re
 	if ( sys != NULL )
 	{
 		sys->reuseQueryAcrossSubsteps = reuse != 0;
+	}
+}
+
+float lfParticleSystem_GetPassMs( const lfParticleSystem* sys, int id )
+{
+	if ( sys == NULL || id < 0 || id >= LF_PASS_COUNT )
+	{
+		return 0.0f;
+	}
+	return sys->passMs[id];
+}
+
+int lfParticleSystem_GetParticleContactCount( const lfParticleSystem* sys )
+{
+	return sys != NULL ? sys->particleContactCount : 0;
+}
+
+void lfParticleSystem_SetSkipPass( lfParticleSystem* sys, int id, int skip )
+{
+	if ( sys == NULL || id < 0 || id >= LF_PASS_COUNT )
+	{
+		return;
+	}
+	if ( skip )
+	{
+		sys->skipPassMask |= ( 1 << id );
+	}
+	else
+	{
+		sys->skipPassMask &= ~( 1 << id );
+	}
+}
+
+void lfParticleSystem_SetReuseParticleContacts( lfParticleSystem* sys, int reuse )
+{
+	if ( sys != NULL )
+	{
+		sys->reuseParticleContacts = reuse != 0;
 	}
 }
 

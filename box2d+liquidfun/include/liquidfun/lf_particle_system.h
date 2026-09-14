@@ -284,6 +284,10 @@ B2_API void lfParticleSystem_SetSkipBodyImpulse( lfParticleSystem* system, int s
 B2_API void lfParticleSystem_SetSkipBodyVelocity( lfParticleSystem* system, int skip );
 // H14: first sub-step queries full-dt swept AABB; later sub-steps reuse queryShapes.
 B2_API void lfParticleSystem_SetReuseQueryAcrossSubsteps( lfParticleSystem* system, int reuse );
+B2_API float lfParticleSystem_GetPassMs( const lfParticleSystem* system, int id );
+B2_API int lfParticleSystem_GetParticleContactCount( const lfParticleSystem* system );
+B2_API void lfParticleSystem_SetSkipPass( lfParticleSystem* system, int id, int skip );
+B2_API void lfParticleSystem_SetReuseParticleContacts( lfParticleSystem* system, int reuse );
 
 // ----------------------------------------------------------------------
 // Accessors (read-only views into the internal SoA buffers).

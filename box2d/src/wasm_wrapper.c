@@ -3055,6 +3055,36 @@ void set_lf_reuse_query_across_substeps( int reuse )
 }
 
 EMSCRIPTEN_KEEPALIVE
+float get_lf_pass_ms( int id )
+{
+	return g_particles == NULL ? 0.0f : lfParticleSystem_GetPassMs( g_particles, id );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_lf_particle_contact_count( void )
+{
+	return g_particles == NULL ? 0 : lfParticleSystem_GetParticleContactCount( g_particles );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void set_lf_skip_pass( int id, int skip )
+{
+	if ( g_particles != NULL )
+	{
+		lfParticleSystem_SetSkipPass( g_particles, id, skip );
+	}
+}
+
+EMSCRIPTEN_KEEPALIVE
+void set_lf_reuse_particle_contacts( int reuse )
+{
+	if ( g_particles != NULL )
+	{
+		lfParticleSystem_SetReuseParticleContacts( g_particles, reuse );
+	}
+}
+
+EMSCRIPTEN_KEEPALIVE
 int get_particle_capacity( void )
 {
 	return g_particle_capacity;
