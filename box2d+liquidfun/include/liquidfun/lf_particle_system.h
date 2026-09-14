@@ -272,6 +272,19 @@ B2_API int lfGetWorkerCount( void );
 // Wire LF parallel-for to this world's Box2D scheduler (built-in or custom).
 B2_API void lfBindBox2dWorld( b2WorldId worldId );
 
+// Last-step Box2D public-API counters (reset at the start of each Step).
+B2_API int lfParticleSystem_GetBodyContactCount( const lfParticleSystem* system );
+B2_API int lfParticleSystem_GetQueryShapeCount( const lfParticleSystem* system );
+B2_API int lfParticleSystem_GetOverlapAabbCalls( const lfParticleSystem* system );
+B2_API int lfParticleSystem_GetApplyImpulseCalls( const lfParticleSystem* system );
+B2_API int lfParticleSystem_GetWorldPointVelocityCalls( const lfParticleSystem* system );
+B2_API int lfParticleSystem_GetBodyPropCalls( const lfParticleSystem* system );
+// Ceiling / A-B flags (default 0). Skip still counts the would-be API call.
+B2_API void lfParticleSystem_SetSkipBodyImpulse( lfParticleSystem* system, int skip );
+B2_API void lfParticleSystem_SetSkipBodyVelocity( lfParticleSystem* system, int skip );
+// H14: first sub-step queries full-dt swept AABB; later sub-steps reuse queryShapes.
+B2_API void lfParticleSystem_SetReuseQueryAcrossSubsteps( lfParticleSystem* system, int reuse );
+
 // ----------------------------------------------------------------------
 // Accessors (read-only views into the internal SoA buffers).
 // If the system was created with growable=false, these pointers are stable

@@ -2992,6 +2992,69 @@ int get_lf_worker_count( void )
 }
 
 EMSCRIPTEN_KEEPALIVE
+int get_lf_body_contact_count( void )
+{
+	return g_particles == NULL ? 0 : lfParticleSystem_GetBodyContactCount( g_particles );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_lf_query_shape_count( void )
+{
+	return g_particles == NULL ? 0 : lfParticleSystem_GetQueryShapeCount( g_particles );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_lf_overlap_aabb_calls( void )
+{
+	return g_particles == NULL ? 0 : lfParticleSystem_GetOverlapAabbCalls( g_particles );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_lf_apply_impulse_calls( void )
+{
+	return g_particles == NULL ? 0 : lfParticleSystem_GetApplyImpulseCalls( g_particles );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_lf_world_point_velocity_calls( void )
+{
+	return g_particles == NULL ? 0 : lfParticleSystem_GetWorldPointVelocityCalls( g_particles );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int get_lf_body_prop_calls( void )
+{
+	return g_particles == NULL ? 0 : lfParticleSystem_GetBodyPropCalls( g_particles );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void set_lf_skip_body_impulse( int skip )
+{
+	if ( g_particles != NULL )
+	{
+		lfParticleSystem_SetSkipBodyImpulse( g_particles, skip );
+	}
+}
+
+EMSCRIPTEN_KEEPALIVE
+void set_lf_skip_body_velocity( int skip )
+{
+	if ( g_particles != NULL )
+	{
+		lfParticleSystem_SetSkipBodyVelocity( g_particles, skip );
+	}
+}
+
+EMSCRIPTEN_KEEPALIVE
+void set_lf_reuse_query_across_substeps( int reuse )
+{
+	if ( g_particles != NULL )
+	{
+		lfParticleSystem_SetReuseQueryAcrossSubsteps( g_particles, reuse );
+	}
+}
+
+EMSCRIPTEN_KEEPALIVE
 int get_particle_capacity( void )
 {
 	return g_particle_capacity;

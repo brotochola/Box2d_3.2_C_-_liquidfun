@@ -385,15 +385,35 @@ struct lfParticleSystem
 	b2ShapeId* queryShapes;
 	int queryShapeCount;
 	int queryShapeCapacity;
-};
 
-// WASM particle step is single-thread; SolveCollision callback reads these.
-static float s_collisionDt;
-static float s_collisionInvDt;
+	// SolveCollision CCD. On the system, not process statics: two systems
+	// (or a later parallel collision pass) must not share dt.
+	float collisionDt;
+	float collisionInvDt;
+
+	int overlapAabbCalls;
+	int applyImpulseCalls;
+	int worldPointVelocityCalls;
+	int bodyPropCalls;
+	int skipBodyImpulse;
+	int skipBodyVelocity;
+	int reuseQueryAcrossSubsteps;
+};
 
 // ------------------------------------------------------------------------
 // Small helpers
 // ------------------------------------------------------------------------
+
+static int LfReallocAssign( void** slot, size_t bytes )
+{
+	void* next = realloc( *slot, bytes );
+	if ( next == NULL )
+	{
+		return 0;
+	}
+	*slot = next;
+	return 1;
+}
 
 static int NextPow2( int x )
 {
@@ -432,6 +452,7 @@ static bool GroupIsValid( const lfParticleSystem* sys, lfParticleGroupId groupId
 // but reuses the same grid buffers (see comment below).
 static void EnsureHashForCount( lfParticleSystem* sys );
 static void RotateBuffer( lfParticleSystem* sys, int start, int mid, int end );
+static bool EnsurePairCapacity( lfParticleSystem* sys, int minCapacity );
 
 static void CapturePairs( lfParticleSystem* sys, int start, int n )
 {
@@ -488,10 +509,9 @@ static void CapturePairs( lfParticleSystem* sys, int start, int n )
 					float distSqr = b2LengthSquared( delta );
 					if ( distSqr < maxDistSqr && distSqr > 1e-9f )
 					{
-						if ( sys->pairCount == sys->pairCapacity )
+						if ( !EnsurePairCapacity( sys, sys->pairCount + 1 ) )
 						{
-							sys->pairCapacity = sys->pairCapacity > 0 ? sys->pairCapacity * 2 : 256;
-							sys->pairs = (lfParticlePair*)realloc( sys->pairs, (size_t)sys->pairCapacity * sizeof( lfParticlePair ) );
+							continue;
 						}
 						lfParticlePair* p = &sys->pairs[sys->pairCount++];
 						p->a = (uint16_t)i;
@@ -597,30 +617,34 @@ static bool EnsureCapacity( lfParticleSystem* sys, int minCapacity )
 		newCapacity *= 2;
 	}
 
-	sys->posX = (float*)realloc( sys->posX, (size_t)newCapacity * sizeof( float ) );
-	sys->posY = (float*)realloc( sys->posY, (size_t)newCapacity * sizeof( float ) );
-	sys->velX = (float*)realloc( sys->velX, (size_t)newCapacity * sizeof( float ) );
-	sys->velY = (float*)realloc( sys->velY, (size_t)newCapacity * sizeof( float ) );
-	sys->weight = (float*)realloc( sys->weight, (size_t)newCapacity * sizeof( float ) );
-	sys->flags = (uint32_t*)realloc( sys->flags, (size_t)newCapacity * sizeof( uint32_t ) );
-	sys->next = (uint16_t*)realloc( sys->next, (size_t)newCapacity * sizeof( uint16_t ) );
-	sys->cellX = (int*)realloc( sys->cellX, (size_t)newCapacity * sizeof( int ) );
-	sys->cellY = (int*)realloc( sys->cellY, (size_t)newCapacity * sizeof( int ) );
-	sys->groupIndex = (int*)realloc( sys->groupIndex, (size_t)newCapacity * sizeof( int ) );
-	sys->restOffset = (b2Vec2*)realloc( sys->restOffset, (size_t)newCapacity * sizeof( b2Vec2 ) );
-	sys->force = (b2Vec2*)realloc( sys->force, (size_t)newCapacity * sizeof( b2Vec2 ) );
-	sys->depth = (float*)realloc( sys->depth, (size_t)newCapacity * sizeof( float ) );
-	sys->accumulation = (float*)realloc( sys->accumulation, (size_t)newCapacity * sizeof( float ) );
-	sys->remainingLife = (float*)realloc( sys->remainingLife, (size_t)newCapacity * sizeof( float ) );
-	sys->totalLife = (float*)realloc( sys->totalLife, (size_t)newCapacity * sizeof( float ) );
-	sys->renderAlpha = (float*)realloc( sys->renderAlpha, (size_t)newCapacity * sizeof( float ) );
-	sys->viscousScale = (float*)realloc( sys->viscousScale, (size_t)newCapacity * sizeof( float ) );
-	sys->userData = (uint32_t*)realloc( sys->userData, (size_t)newCapacity * sizeof( uint32_t ) );
-	sys->color = (uint32_t*)realloc( sys->color, (size_t)newCapacity * sizeof( uint32_t ) );
-	sys->staticPressure = (float*)realloc( sys->staticPressure, (size_t)newCapacity * sizeof( float ) );
-	sys->staticPressureAccum = (float*)realloc( sys->staticPressureAccum, (size_t)newCapacity * sizeof( float ) );
-	sys->accumulation2 = (b2Vec2*)realloc( sys->accumulation2, (size_t)newCapacity * sizeof( b2Vec2 ) );
-
+	int ok = 1;
+	ok = ok && LfReallocAssign( (void**)&sys->posX, (size_t)newCapacity * sizeof( float ) );
+	ok = ok && LfReallocAssign( (void**)&sys->posY, (size_t)newCapacity * sizeof( float ) );
+	ok = ok && LfReallocAssign( (void**)&sys->velX, (size_t)newCapacity * sizeof( float ) );
+	ok = ok && LfReallocAssign( (void**)&sys->velY, (size_t)newCapacity * sizeof( float ) );
+	ok = ok && LfReallocAssign( (void**)&sys->weight, (size_t)newCapacity * sizeof( float ) );
+	ok = ok && LfReallocAssign( (void**)&sys->flags, (size_t)newCapacity * sizeof( uint32_t ) );
+	ok = ok && LfReallocAssign( (void**)&sys->next, (size_t)newCapacity * sizeof( uint16_t ) );
+	ok = ok && LfReallocAssign( (void**)&sys->cellX, (size_t)newCapacity * sizeof( int ) );
+	ok = ok && LfReallocAssign( (void**)&sys->cellY, (size_t)newCapacity * sizeof( int ) );
+	ok = ok && LfReallocAssign( (void**)&sys->groupIndex, (size_t)newCapacity * sizeof( int ) );
+	ok = ok && LfReallocAssign( (void**)&sys->restOffset, (size_t)newCapacity * sizeof( b2Vec2 ) );
+	ok = ok && LfReallocAssign( (void**)&sys->force, (size_t)newCapacity * sizeof( b2Vec2 ) );
+	ok = ok && LfReallocAssign( (void**)&sys->depth, (size_t)newCapacity * sizeof( float ) );
+	ok = ok && LfReallocAssign( (void**)&sys->accumulation, (size_t)newCapacity * sizeof( float ) );
+	ok = ok && LfReallocAssign( (void**)&sys->remainingLife, (size_t)newCapacity * sizeof( float ) );
+	ok = ok && LfReallocAssign( (void**)&sys->totalLife, (size_t)newCapacity * sizeof( float ) );
+	ok = ok && LfReallocAssign( (void**)&sys->renderAlpha, (size_t)newCapacity * sizeof( float ) );
+	ok = ok && LfReallocAssign( (void**)&sys->viscousScale, (size_t)newCapacity * sizeof( float ) );
+	ok = ok && LfReallocAssign( (void**)&sys->userData, (size_t)newCapacity * sizeof( uint32_t ) );
+	ok = ok && LfReallocAssign( (void**)&sys->color, (size_t)newCapacity * sizeof( uint32_t ) );
+	ok = ok && LfReallocAssign( (void**)&sys->staticPressure, (size_t)newCapacity * sizeof( float ) );
+	ok = ok && LfReallocAssign( (void**)&sys->staticPressureAccum, (size_t)newCapacity * sizeof( float ) );
+	ok = ok && LfReallocAssign( (void**)&sys->accumulation2, (size_t)newCapacity * sizeof( b2Vec2 ) );
+	if ( !ok )
+	{
+		return false;
+	}
 	sys->capacity = newCapacity;
 	return true;
 }
@@ -638,9 +662,15 @@ static bool EnsureGroupCapacity( lfParticleSystem* sys, int minCapacity )
 		newCapacity *= 2;
 	}
 
-	sys->groups = (lfParticleGroup*)realloc( sys->groups, (size_t)newCapacity * sizeof( lfParticleGroup ) );
+	lfParticleGroup* next =
+		(lfParticleGroup*)realloc( sys->groups, (size_t)newCapacity * sizeof( lfParticleGroup ) );
+	if ( next == NULL )
+	{
+		return false;
+	}
+	sys->groups = next;
 	sys->groupCapacity = newCapacity;
-	return sys->groups != NULL;
+	return true;
 }
 
 lfParticleSystem* lfParticleSystem_Create( b2WorldId worldId, const lfParticleSystemDef* def )
@@ -666,6 +696,7 @@ lfParticleSystem* lfParticleSystem_Create( b2WorldId worldId, const lfParticleSy
 	sys->allGroupFlags = 0;
 	sys->hasShapeGroups = false;
 	sys->hasForce = false;
+	sys->reuseQueryAcrossSubsteps = 1;
 	// Mass of a particle modeled as if it packed a `diameter x diameter`
 	// square of fluid at rest - a common, simple convention for grid/SPH
 	// particle mass that keeps pressure math independent of pi.
@@ -1379,11 +1410,47 @@ void lfParticleSystem_SetParticleColorRange( lfParticleSystem* sys, int firstInd
 	}
 }
 
-static int CompareIntDescending( const void* a, const void* b )
+static void PermuteSlice( void* base, size_t elemSize, int first, int n, const int* srcIndex, void* tmp )
 {
-	int ia = *(const int*)a;
-	int ib = *(const int*)b;
-	return ( ib > ia ) - ( ib < ia );
+	unsigned char* p = (unsigned char*)base;
+	unsigned char* t = (unsigned char*)tmp;
+	for ( int k = 0; k < n; k++ )
+	{
+		memcpy( t + (size_t)k * elemSize, p + (size_t)srcIndex[k] * elemSize, elemSize );
+	}
+	memcpy( p + (size_t)first * elemSize, t, (size_t)n * elemSize );
+}
+
+static int PermuteParticleRange( lfParticleSystem* sys, int first, int n, const int* srcIndex )
+{
+	if ( n <= 0 )
+	{
+		return 1;
+	}
+	void* tmp = malloc( (size_t)n * sizeof( b2Vec2 ) );
+	if ( tmp == NULL )
+	{
+		return 0;
+	}
+	PermuteSlice( sys->posX, sizeof( float ), first, n, srcIndex, tmp );
+	PermuteSlice( sys->posY, sizeof( float ), first, n, srcIndex, tmp );
+	PermuteSlice( sys->velX, sizeof( float ), first, n, srcIndex, tmp );
+	PermuteSlice( sys->velY, sizeof( float ), first, n, srcIndex, tmp );
+	PermuteSlice( sys->weight, sizeof( float ), first, n, srcIndex, tmp );
+	PermuteSlice( sys->flags, sizeof( uint32_t ), first, n, srcIndex, tmp );
+	PermuteSlice( sys->groupIndex, sizeof( int ), first, n, srcIndex, tmp );
+	PermuteSlice( sys->restOffset, sizeof( b2Vec2 ), first, n, srcIndex, tmp );
+	PermuteSlice( sys->force, sizeof( b2Vec2 ), first, n, srcIndex, tmp );
+	PermuteSlice( sys->depth, sizeof( float ), first, n, srcIndex, tmp );
+	PermuteSlice( sys->staticPressure, sizeof( float ), first, n, srcIndex, tmp );
+	PermuteSlice( sys->remainingLife, sizeof( float ), first, n, srcIndex, tmp );
+	PermuteSlice( sys->totalLife, sizeof( float ), first, n, srcIndex, tmp );
+	PermuteSlice( sys->renderAlpha, sizeof( float ), first, n, srcIndex, tmp );
+	PermuteSlice( sys->viscousScale, sizeof( float ), first, n, srcIndex, tmp );
+	PermuteSlice( sys->userData, sizeof( uint32_t ), first, n, srcIndex, tmp );
+	PermuteSlice( sys->color, sizeof( uint32_t ), first, n, srcIndex, tmp );
+	free( tmp );
+	return 1;
 }
 
 lfParticleGroupId lfParticleSystem_ExtractParticles( lfParticleSystem* sys, lfParticleGroupId groupId,
@@ -1404,13 +1471,14 @@ lfParticleGroupId lfParticleSystem_ExtractParticles( lfParticleSystem* sys, lfPa
 		return LF_NULL_PARTICLE_GROUP;
 	}
 
-	int* list = (int*)malloc( (size_t)count * sizeof( int ) );
-	if ( list == NULL )
+	int origCount = last - first;
+	uint8_t* take = (uint8_t*)calloc( (size_t)origCount, 1 );
+	if ( take == NULL )
 	{
 		return LF_NULL_PARTICLE_GROUP;
 	}
 
-	int n = 0;
+	int nExt = 0;
 	for ( int i = 0; i < count; i++ )
 	{
 		int idx = indices[i];
@@ -1426,73 +1494,115 @@ lfParticleGroupId lfParticleSystem_ExtractParticles( lfParticleSystem* sys, lfPa
 		{
 			continue;
 		}
-		list[n++] = idx;
+		int off = idx - first;
+		if ( take[off] )
+		{
+			continue;
+		}
+		take[off] = 1;
+		nExt++;
 	}
 
-	if ( n <= 0 )
+	if ( nExt <= 0 )
 	{
-		free( list );
+		free( take );
 		return LF_NULL_PARTICLE_GROUP;
 	}
-
-	qsort( list, (size_t)n, sizeof( int ), CompareIntDescending );
-	int w = 1;
-	for ( int i = 1; i < n; i++ )
-	{
-		if ( list[i] != list[w - 1] )
-		{
-			list[w++] = list[i];
-		}
-	}
-	n = w;
 
 	uint32_t savedFlags = g->flags;
 	float savedStrength = g->strength;
 	float savedViscous = g->viscousScale;
-	int origCount = g->count;
 	int origFirst = first;
-	int origLast = last;
 
 	int newGid = AllocGroup( sys );
 	if ( newGid < 0 )
 	{
-		free( list );
+		free( take );
 		return LF_NULL_PARTICLE_GROUP;
 	}
-	// AllocGroup may realloc sys->groups.
 	g = &sys->groups[groupId];
 
 	int extractStart;
-	int extractCount = n;
+	int extractCount = nExt;
 
-	if ( n >= origCount )
+	if ( nExt >= origCount )
 	{
 		extractStart = origFirst;
 		extractCount = origCount;
 		g->firstIndex = 0;
 		g->lastIndex = 0;
 		g->count = 0;
+		free( take );
 	}
 	else
 	{
-		int end = origLast;
-		for ( int i = 0; i < n; i++ )
+		int* srcIndex = (int*)malloc( (size_t)origCount * sizeof( int ) );
+		int* newIndex = (int*)malloc( (size_t)sys->count * sizeof( int ) );
+		if ( srcIndex == NULL || newIndex == NULL )
 		{
-			int idx = list[i];
-			RotateBuffer( sys, idx, idx + 1, end );
-			end--;
+			free( take );
+			free( srcIndex );
+			free( newIndex );
+			sys->groups[newGid].alive = false;
+			return LF_NULL_PARTICLE_GROUP;
 		}
-		// RotateBuffer remaps every group's first/last as if the rotate were a
-		// Join/compact of that group. Extract only shuffles inside [origFirst, origLast):
-		// remaining particles pack at origFirst, extracted sit at [end, origLast).
-		// Restore the source range or extracting the front/middle zeros the slab
-		// (firstIndex jumps) and the next Step OOBs.
+		for ( int i = 0; i < sys->count; i++ )
+		{
+			newIndex[i] = i;
+		}
+		int nRem = 0;
+		for ( int i = 0; i < origCount; i++ )
+		{
+			if ( !take[i] )
+			{
+				srcIndex[nRem++] = origFirst + i;
+			}
+		}
+		int packedExt = 0;
+		for ( int i = 0; i < origCount; i++ )
+		{
+			if ( take[i] )
+			{
+				srcIndex[nRem + packedExt] = origFirst + i;
+				packedExt++;
+			}
+		}
+		for ( int k = 0; k < origCount; k++ )
+		{
+			newIndex[srcIndex[k]] = origFirst + k;
+		}
+		if ( !PermuteParticleRange( sys, origFirst, origCount, srcIndex ) )
+		{
+			free( take );
+			free( srcIndex );
+			free( newIndex );
+			sys->groups[newGid].alive = false;
+			return LF_NULL_PARTICLE_GROUP;
+		}
+		for ( int k = 0; k < sys->pairCount; k++ )
+		{
+			int a = sys->pairs[k].a;
+			int b = sys->pairs[k].b;
+			if ( a >= 0 && a < sys->count )
+			{
+				sys->pairs[k].a = (uint16_t)newIndex[a];
+			}
+			if ( b >= 0 && b < sys->count )
+			{
+				sys->pairs[k].b = (uint16_t)newIndex[b];
+			}
+		}
+		free( take );
+		free( srcIndex );
+		free( newIndex );
+
+		int end = origFirst + nRem;
 		g = &sys->groups[groupId];
 		g->firstIndex = origFirst;
 		g->lastIndex = end;
-		g->count = end - origFirst;
+		g->count = nRem;
 		extractStart = end;
-		extractCount = origLast - end;
+		extractCount = packedExt;
 		if ( g->count > 0 )
 		{
 			RebuildGroupRestFromPositions( sys, g );
@@ -1502,8 +1612,6 @@ lfParticleGroupId lfParticleSystem_ExtractParticles( lfParticleSystem* sys, lfPa
 			}
 		}
 	}
-
-	free( list );
 
 	g = &sys->groups[groupId];
 	if ( g->count <= 0 )
@@ -2048,15 +2156,30 @@ static void GrowParticleContactCap( lfParticleSystem* sys, int need )
 	{
 		cap *= 2;
 	}
-	sys->particleContacts =
+	lfParticleContact* nextContacts =
 		(lfParticleContact*)realloc( sys->particleContacts, (size_t)cap * sizeof( lfParticleContact ) );
-	sys->staticPressureContactIndices = (int*)realloc( sys->staticPressureContactIndices, (size_t)cap * sizeof( int ) );
+	if ( nextContacts == NULL )
+	{
+		return;
+	}
+	int* nextIndices = (int*)realloc( sys->staticPressureContactIndices, (size_t)cap * sizeof( int ) );
+	if ( nextIndices == NULL )
+	{
+		sys->particleContacts = nextContacts;
+		return;
+	}
+	sys->particleContacts = nextContacts;
+	sys->staticPressureContactIndices = nextIndices;
 	sys->particleContactCapacity = cap;
 }
 
 static void PushParticleContact( lfParticleSystem* sys, int a, int b, b2Vec2 normal, float weight )
 {
 	GrowParticleContactCap( sys, sys->particleContactCount + 1 );
+	if ( sys->particleContacts == NULL || sys->particleContactCount >= sys->particleContactCapacity )
+	{
+		return;
+	}
 	lfParticleContact* c = &sys->particleContacts[sys->particleContactCount++];
 	c->a = (uint16_t)a;
 	c->b = (uint16_t)b;
@@ -2071,8 +2194,13 @@ static void PushContactBucket( lfParticleSystem* sys, int blockIndex, int a, int
 	if ( *count == *cap )
 	{
 		int next = *cap < 256 ? 256 : *cap * 2;
-		sys->contactBucket[blockIndex] =
+		lfParticleContact* grown =
 			(lfParticleContact*)realloc( sys->contactBucket[blockIndex], (size_t)next * sizeof( lfParticleContact ) );
+		if ( grown == NULL )
+		{
+			return;
+		}
+		sys->contactBucket[blockIndex] = grown;
 		*cap = next;
 	}
 	lfParticleContact* c = &sys->contactBucket[blockIndex][( *count )++];
@@ -2205,13 +2333,64 @@ static void FindParticleContacts( lfParticleSystem* sys )
 // Particle / rigid body contact detection, via Box2D's public query API
 // ------------------------------------------------------------------------
 
+static b2BodyType LfBodyGetType( lfParticleSystem* sys, b2BodyId bodyId )
+{
+	sys->bodyPropCalls++;
+	return b2Body_GetType( bodyId );
+}
+
+static float LfBodyGetMass( lfParticleSystem* sys, b2BodyId bodyId )
+{
+	sys->bodyPropCalls++;
+	return b2Body_GetMass( bodyId );
+}
+
+static float LfBodyGetRotationalInertia( lfParticleSystem* sys, b2BodyId bodyId )
+{
+	sys->bodyPropCalls++;
+	return b2Body_GetRotationalInertia( bodyId );
+}
+
+static b2Vec2 LfBodyGetWorldCenter( lfParticleSystem* sys, b2BodyId bodyId )
+{
+	sys->bodyPropCalls++;
+	return b2Body_GetWorldCenter( bodyId );
+}
+
+static b2Vec2 LfBodyGetWorldPointVelocity( lfParticleSystem* sys, b2BodyId bodyId, b2Pos p )
+{
+	sys->worldPointVelocityCalls++;
+	if ( sys->skipBodyVelocity )
+	{
+		return b2Vec2_zero;
+	}
+	return b2Body_GetWorldPointVelocity( bodyId, p );
+}
+
+static void LfBodyApplyLinearImpulse( lfParticleSystem* sys, b2BodyId bodyId, b2Vec2 impulse, b2Vec2 point )
+{
+	sys->applyImpulseCalls++;
+	if ( sys->skipBodyImpulse )
+	{
+		return;
+	}
+	b2Body_ApplyLinearImpulse( bodyId, impulse, point, true );
+}
+
 static void PushBodyContact( lfParticleSystem* sys, int index, b2BodyId bodyId, b2ShapeId shapeId, b2Vec2 normal,
 							 float weight, float invMassA, float mass )
 {
 	if ( sys->bodyContactCount == sys->bodyContactCapacity )
 	{
-		sys->bodyContactCapacity *= 2;
-		sys->bodyContacts = (lfBodyContact*)realloc( sys->bodyContacts, (size_t)sys->bodyContactCapacity * sizeof( lfBodyContact ) );
+		int nextCap = sys->bodyContactCapacity > 0 ? sys->bodyContactCapacity * 2 : 512;
+		lfBodyContact* next =
+			(lfBodyContact*)realloc( sys->bodyContacts, (size_t)nextCap * sizeof( lfBodyContact ) );
+		if ( next == NULL )
+		{
+			return;
+		}
+		sys->bodyContacts = next;
+		sys->bodyContactCapacity = nextCap;
 	}
 	lfBodyContact* c = &sys->bodyContacts[sys->bodyContactCount++];
 	c->index = (uint16_t)index;
@@ -2390,13 +2569,13 @@ static void ContactParticleWithShape( lfParticleSystem* sys, int i, b2ShapeId sh
 	float invMassB = 0.0f;
 	float invIB = 0.0f;
 	b2Vec2 bodyCenter = ( b2Vec2 ){ 0.0f, 0.0f };
-	if ( b2Body_GetType( bodyId ) == b2_dynamicBody )
+	if ( LfBodyGetType( sys, bodyId ) == b2_dynamicBody )
 	{
-		float bm = b2Body_GetMass( bodyId );
-		float bI = b2Body_GetRotationalInertia( bodyId );
+		float bm = LfBodyGetMass( sys, bodyId );
+		float bI = LfBodyGetRotationalInertia( sys, bodyId );
 		invMassB = bm > 0.0f ? 1.0f / bm : 0.0f;
 		invIB = bI > 0.0f ? 1.0f / bI : 0.0f;
-		bodyCenter = b2Body_GetWorldCenter( bodyId );
+		bodyCenter = LfBodyGetWorldCenter( sys, bodyId );
 	}
 
 	b2Vec2 r = b2Sub( ap, bodyCenter );
@@ -2412,8 +2591,15 @@ static bool CollectShapeCallback( b2ShapeId shapeId, void* context )
 	lfParticleSystem* sys = (lfParticleSystem*)context;
 	if ( sys->queryShapeCount == sys->queryShapeCapacity )
 	{
-		sys->queryShapeCapacity *= 2;
-		sys->queryShapes = (b2ShapeId*)realloc( sys->queryShapes, (size_t)sys->queryShapeCapacity * sizeof( b2ShapeId ) );
+		int nextCap = sys->queryShapeCapacity > 0 ? sys->queryShapeCapacity * 2 : 128;
+		b2ShapeId* next =
+			(b2ShapeId*)realloc( sys->queryShapes, (size_t)nextCap * sizeof( b2ShapeId ) );
+		if ( next == NULL )
+		{
+			return false;
+		}
+		sys->queryShapes = next;
+		sys->queryShapeCapacity = nextCap;
 	}
 	sys->queryShapes[sys->queryShapeCount++] = shapeId;
 	return true;
@@ -2421,6 +2607,7 @@ static bool CollectShapeCallback( b2ShapeId shapeId, void* context )
 
 static void CollectOverlappingShapes( lfParticleSystem* sys, b2AABB aabb )
 {
+	sys->overlapAabbCalls++;
 	sys->queryShapeCount = 0;
 	b2QueryFilter filter = b2DefaultQueryFilter();
 	b2World_OverlapAABB( sys->worldId, b2Pos_zero, aabb, filter, CollectShapeCallback, sys );
@@ -2550,17 +2737,65 @@ static void RemoveSpuriousBodyContacts( lfParticleSystem* sys )
 	sys->bodyContactCount = tail;
 }
 
+static float LfHMin4( __m128 v )
+{
+	__m128 sh = _mm_movehl_ps( v, v );
+	__m128 m = _mm_min_ps( v, sh );
+	sh = _mm_shuffle_ps( m, m, 1 );
+	return _mm_cvtss_f32( _mm_min_ss( m, sh ) );
+}
+
+static float LfHMax4( __m128 v )
+{
+	__m128 sh = _mm_movehl_ps( v, v );
+	__m128 m = _mm_max_ps( v, sh );
+	sh = _mm_shuffle_ps( m, m, 1 );
+	return _mm_cvtss_f32( _mm_max_ss( m, sh ) );
+}
+
 static b2AABB ComputeSweptCloudAABB( const lfParticleSystem* sys, float dt, float pad )
 {
 	b2AABB aabb = { { 1e9f, 1e9f }, { -1e9f, -1e9f } };
-	for ( int i = 0; i < sys->count; i++ )
+	const float* px = sys->posX;
+	const float* py = sys->posY;
+	const float* vx = sys->velX;
+	const float* vy = sys->velY;
+	const int n = sys->count;
+	int i = 0;
+	const int n4 = n & ~3;
+	if ( n4 >= 4 )
 	{
-		b2Vec2 p = ( (b2Vec2){ sys->posX[i], sys->posY[i] } );
-		b2Vec2 p2 = b2Add( p, b2MulSV( dt, ( (b2Vec2){ sys->velX[i], sys->velY[i] } ) ) );
-		float minx = p.x < p2.x ? p.x : p2.x;
-		float miny = p.y < p2.y ? p.y : p2.y;
-		float maxx = p.x > p2.x ? p.x : p2.x;
-		float maxy = p.y > p2.y ? p.y : p2.y;
+		__m128 dtv = _mm_set1_ps( dt );
+		__m128 minx = _mm_set1_ps( 1e9f );
+		__m128 miny = _mm_set1_ps( 1e9f );
+		__m128 maxx = _mm_set1_ps( -1e9f );
+		__m128 maxy = _mm_set1_ps( -1e9f );
+		for ( ; i < n4; i += 4 )
+		{
+			__m128 p = _mm_loadu_ps( px + i );
+			__m128 p2 = _mm_add_ps( p, _mm_mul_ps( dtv, _mm_loadu_ps( vx + i ) ) );
+			minx = _mm_min_ps( minx, _mm_min_ps( p, p2 ) );
+			maxx = _mm_max_ps( maxx, _mm_max_ps( p, p2 ) );
+			p = _mm_loadu_ps( py + i );
+			p2 = _mm_add_ps( p, _mm_mul_ps( dtv, _mm_loadu_ps( vy + i ) ) );
+			miny = _mm_min_ps( miny, _mm_min_ps( p, p2 ) );
+			maxy = _mm_max_ps( maxy, _mm_max_ps( p, p2 ) );
+		}
+		aabb.lowerBound.x = LfHMin4( minx );
+		aabb.lowerBound.y = LfHMin4( miny );
+		aabb.upperBound.x = LfHMax4( maxx );
+		aabb.upperBound.y = LfHMax4( maxy );
+	}
+	for ( ; i < n; i++ )
+	{
+		float x = px[i];
+		float y = py[i];
+		float x2 = x + dt * vx[i];
+		float y2 = y + dt * vy[i];
+		float minx = x < x2 ? x : x2;
+		float miny = y < y2 ? y : y2;
+		float maxx = x > x2 ? x : x2;
+		float maxy = y > y2 ? y : y2;
 		if ( minx < aabb.lowerBound.x )
 		{
 			aabb.lowerBound.x = minx;
@@ -2589,7 +2824,7 @@ static void StopAtSurface( lfParticleSystem* sys, int i, b2Vec2 p, b2Vec2 p1, b2
 {
 	b2Vec2 hit = b2Add( b2MulSV( 1.0f - fraction, p1 ), b2MulSV( fraction, p2 ) );
 	b2Vec2 target = b2Add( hit, b2MulSV( B2_LINEAR_SLOP, n ) );
-	{ b2Vec2 __v = b2MulSV( s_collisionInvDt, b2Sub( target, p ) ); sys->velX[i] = __v.x; sys->velY[i] = __v.y; }
+	{ b2Vec2 __v = b2MulSV( sys->collisionInvDt, b2Sub( target, p ) ); sys->velX[i] = __v.x; sys->velY[i] = __v.y; }
 }
 
 static void RayCastParticleShape( lfParticleSystem* sys, int i, b2ShapeId shapeId )
@@ -2600,7 +2835,7 @@ static void RayCastParticleShape( lfParticleSystem* sys, int i, b2ShapeId shapeI
 	}
 
 	b2Pos p = ( (b2Vec2){ sys->posX[i], sys->posY[i] } );
-	b2Vec2 translation = b2MulSV( s_collisionDt, ( (b2Vec2){ sys->velX[i], sys->velY[i] } ) );
+	b2Vec2 translation = b2MulSV( sys->collisionDt, ( (b2Vec2){ sys->velX[i], sys->velY[i] } ) );
 	b2WorldCastOutput hit = { 0 };
 	if ( b2LengthSquared( translation ) >= 1e-12f )
 	{
@@ -2631,8 +2866,8 @@ static void SolveCollision( lfParticleSystem* sys, float dt )
 		return;
 	}
 
-	s_collisionDt = dt;
-	s_collisionInvDt = 1.0f / dt;
+	sys->collisionDt = dt;
+	sys->collisionInvDt = 1.0f / dt;
 	for ( int s = 0; s < sys->queryShapeCount; s++ )
 	{
 		ForEachParticleNearShape( sys, sys->queryShapes[s], sys->diameter, RayCastParticleShape );
@@ -3105,7 +3340,7 @@ static void SolvePressure( lfParticleSystem* sys, float dt )
 		float hp = h[a] + pressurePerWeight * w;
 		b2Vec2 f = b2MulSV( velocityPerPressure * w * c->mass * hp, c->normal );
 		{ b2Vec2 __v = b2Sub( ( (b2Vec2){ sys->velX[a], sys->velY[a] } ), b2MulSV( c->invMassA, f ) ); sys->velX[a] = __v.x; sys->velY[a] = __v.y; }
-		b2Body_ApplyLinearImpulse( c->bodyId, f, ( (b2Vec2){ sys->posX[a], sys->posY[a] } ), true );
+		LfBodyApplyLinearImpulse( sys, c->bodyId, f, ( (b2Vec2){ sys->posX[a], sys->posY[a] } ) );
 	}
 	for ( int idx = 0; idx < sys->particleContactCount; idx++ )
 	{
@@ -3126,7 +3361,7 @@ static void SolveDamping( lfParticleSystem* sys, float dt )
 		const lfBodyContact* c = &sys->bodyContacts[idx];
 		int a = (int)c->index;
 		b2Vec2 p = ( (b2Vec2){ sys->posX[a], sys->posY[a] } );
-		b2Vec2 v = b2Sub( b2Body_GetWorldPointVelocity( c->bodyId, p ), ( (b2Vec2){ sys->velX[a], sys->velY[a] } ) );
+		b2Vec2 v = b2Sub( LfBodyGetWorldPointVelocity( sys, c->bodyId, p ), ( (b2Vec2){ sys->velX[a], sys->velY[a] } ) );
 		float vn = b2Dot( v, c->normal );
 		if ( vn >= 0.0f )
 		{
@@ -3135,7 +3370,7 @@ static void SolveDamping( lfParticleSystem* sys, float dt )
 		float damping = fmaxf( linearDamping * c->weight, fminf( -quadraticDamping * vn, 0.5f ) );
 		b2Vec2 f = b2MulSV( damping * c->mass * vn, c->normal );
 		{ b2Vec2 __v = b2Add( ( (b2Vec2){ sys->velX[a], sys->velY[a] } ), b2MulSV( c->invMassA, f ) ); sys->velX[a] = __v.x; sys->velY[a] = __v.y; }
-		b2Body_ApplyLinearImpulse( c->bodyId, b2Neg( f ), p, true );
+		LfBodyApplyLinearImpulse( sys, c->bodyId, b2Neg( f ), p );
 	}
 	for ( int idx = 0; idx < sys->particleContactCount; idx++ )
 	{
@@ -3170,10 +3405,10 @@ static void SolveViscous( lfParticleSystem* sys )
 		}
 		float viscous = viscousBase * sys->viscousScale[a];
 		b2Vec2 p = ( (b2Vec2){ sys->posX[a], sys->posY[a] } );
-		b2Vec2 v = b2Sub( b2Body_GetWorldPointVelocity( c->bodyId, p ), ( (b2Vec2){ sys->velX[a], sys->velY[a] } ) );
+		b2Vec2 v = b2Sub( LfBodyGetWorldPointVelocity( sys, c->bodyId, p ), ( (b2Vec2){ sys->velX[a], sys->velY[a] } ) );
 		b2Vec2 f = b2MulSV( viscous * c->mass * c->weight, v );
 		{ b2Vec2 __v = b2Add( ( (b2Vec2){ sys->velX[a], sys->velY[a] } ), b2MulSV( c->invMassA, f ) ); sys->velX[a] = __v.x; sys->velY[a] = __v.y; }
-		b2Body_ApplyLinearImpulse( c->bodyId, b2Neg( f ), p, true );
+		LfBodyApplyLinearImpulse( sys, c->bodyId, b2Neg( f ), p );
 	}
 	for ( int idx = 0; idx < sys->particleContactCount; idx++ )
 	{
@@ -3344,6 +3579,55 @@ static int ParticleCanBeConnected( const lfParticleSystem* sys, int index )
 	return GroupIsValid( sys, gid ) && ( sys->groups[gid].groupFlags & lf_rigidParticleGroup ) != 0;
 }
 
+static uint32_t LfPairKey( uint16_t a, uint16_t b )
+{
+	uint32_t lo = a < b ? a : b;
+	uint32_t hi = a < b ? b : a;
+	return ( lo << 16 ) | hi;
+}
+
+static int LfPairHashHas( const uint32_t* tab, int cap, uint32_t key )
+{
+	uint32_t mask = (uint32_t)( cap - 1 );
+	uint32_t h = key * 2654435761u;
+	for ( int n = 0; n < cap; n++ )
+	{
+		uint32_t slot = tab[( h + (uint32_t)n ) & mask];
+		if ( slot == 0 )
+		{
+			return 0;
+		}
+		if ( slot == key )
+		{
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static void LfPairHashInsert( uint32_t* tab, int cap, uint32_t key )
+{
+	if ( key == 0 )
+	{
+		return;
+	}
+	uint32_t mask = (uint32_t)( cap - 1 );
+	uint32_t h = key * 2654435761u;
+	for ( int n = 0; n < cap; n++ )
+	{
+		uint32_t i = ( h + (uint32_t)n ) & mask;
+		if ( tab[i] == 0 )
+		{
+			tab[i] = key;
+			return;
+		}
+		if ( tab[i] == key )
+		{
+			return;
+		}
+	}
+}
+
 static int PairExists( const lfParticleSystem* sys, uint16_t a, uint16_t b )
 {
 	for ( int k = 0; k < sys->pairCount; k++ )
@@ -3364,6 +3648,21 @@ static void SolveReactive( lfParticleSystem* sys )
 	{
 		return;
 	}
+
+	int hashCap = NextPow2( ( sys->pairCount + sys->particleContactCount + 16 ) * 2 );
+	if ( hashCap < 16 )
+	{
+		hashCap = 16;
+	}
+	uint32_t* pairHash = (uint32_t*)calloc( (size_t)hashCap, sizeof( uint32_t ) );
+	if ( pairHash != NULL )
+	{
+		for ( int k = 0; k < sys->pairCount; k++ )
+		{
+			LfPairHashInsert( pairHash, hashCap, LfPairKey( sys->pairs[k].a, sys->pairs[k].b ) );
+		}
+	}
+
 	for ( int idx = 0; idx < sys->particleContactCount; idx++ )
 	{
 		const lfParticleContact* c = &sys->particleContacts[idx];
@@ -3385,18 +3684,21 @@ static void SolveReactive( lfParticleSystem* sys )
 		{
 			continue;
 		}
-		if ( PairExists( sys, c->a, c->b ) )
+		uint32_t key = LfPairKey( c->a, c->b );
+		if ( pairHash != NULL )
+		{
+			if ( LfPairHashHas( pairHash, hashCap, key ) )
+			{
+				continue;
+			}
+		}
+		else if ( PairExists( sys, c->a, c->b ) )
 		{
 			continue;
 		}
-		if ( sys->pairCount == sys->pairCapacity )
+		if ( !EnsurePairCapacity( sys, sys->pairCount + 1 ) )
 		{
-			sys->pairCapacity = sys->pairCapacity > 0 ? sys->pairCapacity * 2 : 256;
-			sys->pairs = (lfParticlePair*)realloc( sys->pairs, (size_t)sys->pairCapacity * sizeof( lfParticlePair ) );
-			if ( sys->pairs == NULL )
-			{
-				break;
-			}
+			break;
 		}
 		lfParticlePair* p = &sys->pairs[sys->pairCount++];
 		p->a = c->a;
@@ -3410,7 +3712,12 @@ static void SolveReactive( lfParticleSystem* sys )
 		float sa = GroupIsValid( sys, ga ) ? sys->groups[ga].strength : 1.0f;
 		float sb = GroupIsValid( sys, gb ) ? sys->groups[gb].strength : 1.0f;
 		p->strength = sa < sb ? sa : sb;
+		if ( pairHash != NULL )
+		{
+			LfPairHashInsert( pairHash, hashCap, key );
+		}
 	}
+	free( pairHash );
 	for ( int i = 0; i < sys->count; i++ )
 	{
 		sys->flags[i] &= ~lf_reactiveParticle;
@@ -3887,6 +4194,277 @@ static void SolveSolid( lfParticleSystem* sys, float dt )
 	}
 }
 
+// Rigid-group body coupling (Google LiquidFun 1.1.0 SolveRigidDamping behavior;
+// zlib notice — not a paste of that C++). Per-particle SolveDamping is overwritten
+// by SolveRigid; this pass damps group COM/ω so the slab can rest on fixtures.
+static lfParticleGroup* ParticleGroupOrNull( lfParticleSystem* sys, int index )
+{
+	int gid = sys->groupIndex[index];
+	return GroupIsValid( sys, gid ) ? &sys->groups[gid] : NULL;
+}
+
+static b2Vec2 GroupVelocityAt( const lfParticleGroup* group, b2Vec2 p )
+{
+	return b2Add( group->linearVelocity, b2CrossSV( group->angularVelocity, b2Sub( p, group->center ) ) );
+}
+
+static b2Vec2 ParticleOrGroupVelocity( lfParticleSystem* sys, lfParticleGroup* group, int index, b2Vec2 p )
+{
+	if ( group && ( group->groupFlags & lf_rigidParticleGroup ) != 0 )
+	{
+		return GroupVelocityAt( group, p );
+	}
+	return ( b2Vec2 ){ sys->velX[index], sys->velY[index] };
+}
+
+static void InitDampingParameter( float* invMass, float* invInertia, float* tangentDistance, float mass,
+								  float inertia, b2Vec2 center, b2Vec2 point, b2Vec2 normal )
+{
+	*invMass = mass > 0.0f ? 1.0f / mass : 0.0f;
+	*invInertia = inertia > 0.0f ? 1.0f / inertia : 0.0f;
+	*tangentDistance = b2Cross( b2Sub( point, center ), normal );
+}
+
+static void InitDampingParameterGroupOrParticle( lfParticleSystem* sys, float* invMass, float* invInertia,
+												 float* tangentDistance, bool rigid, lfParticleGroup* group,
+												 int particleIndex, b2Vec2 point, b2Vec2 normal )
+{
+	if ( rigid && group )
+	{
+		float inertia = sys->particleMass * group->accR2;
+		InitDampingParameter( invMass, invInertia, tangentDistance, group->mass, inertia, group->center, point,
+							  normal );
+		return;
+	}
+	float mass = ( sys->flags[particleIndex] & lf_wallParticle ) ? 0.0f : sys->particleMass;
+	InitDampingParameter( invMass, invInertia, tangentDistance, mass, 0.0f, point, point, normal );
+}
+
+static float ComputeDampingImpulse( float invMassA, float invInertiaA, float tangentDistanceA, float invMassB,
+									float invInertiaB, float tangentDistanceB, float normalVelocity )
+{
+	float invMass = invMassA + invInertiaA * tangentDistanceA * tangentDistanceA + invMassB +
+					invInertiaB * tangentDistanceB * tangentDistanceB;
+	return invMass > 0.0f ? normalVelocity / invMass : 0.0f;
+}
+
+static void ApplyRigidDamping( lfParticleSystem* sys, float invMass, float invInertia, float tangentDistance,
+							   bool rigid, lfParticleGroup* group, int particleIndex, float impulse, b2Vec2 normal )
+{
+	if ( rigid && group )
+	{
+		group->linearVelocity = b2Add( group->linearVelocity, b2MulSV( impulse * invMass, normal ) );
+		group->angularVelocity += impulse * tangentDistance * invInertia;
+		return;
+	}
+	b2Vec2 dv = b2MulSV( impulse * invMass, normal );
+	sys->velX[particleIndex] += dv.x;
+	sys->velY[particleIndex] += dv.y;
+}
+
+// SOLID↔SOLID: one COM impulse per group pair. Per-contact dampingStrength=1
+// overshoots (N normals fight) and pulls overlapping ice together.
+#define LF_SOLID_PAIR_CAP 256
+
+typedef struct lfSolidPairAcc
+{
+	int gidA;
+	int gidB;
+	int indexA;
+	int indexB;
+	int count;
+	b2Vec2 nSum;
+	b2Vec2 pSum;
+	float wSum;
+} lfSolidPairAcc;
+
+static int FindSolidPair( const lfSolidPairAcc* pairs, int pairN, int gidA, int gidB )
+{
+	for ( int i = 0; i < pairN; i++ )
+	{
+		if ( pairs[i].gidA == gidA && pairs[i].gidB == gidB )
+		{
+			return i;
+		}
+	}
+	return -1;
+}
+
+static void ApplySolidPairDamping( lfParticleSystem* sys, float damping, const lfSolidPairAcc* acc )
+{
+	if ( acc->count <= 0 || acc->wSum <= 0.0f )
+	{
+		return;
+	}
+	if ( !GroupIsValid( sys, acc->gidA ) || !GroupIsValid( sys, acc->gidB ) )
+	{
+		return;
+	}
+	lfParticleGroup* aGroup = &sys->groups[acc->gidA];
+	lfParticleGroup* bGroup = &sys->groups[acc->gidB];
+	bool aRigid = ( aGroup->groupFlags & lf_rigidParticleGroup ) != 0;
+	bool bRigid = ( bGroup->groupFlags & lf_rigidParticleGroup ) != 0;
+	float nLen = b2Length( acc->nSum );
+	if ( nLen < 1e-12f )
+	{
+		return;
+	}
+	b2Vec2 n = b2MulSV( 1.0f / nLen, acc->nSum );
+	b2Vec2 p = b2MulSV( 1.0f / acc->wSum, acc->pSum );
+	b2Vec2 v = b2Sub( ParticleOrGroupVelocity( sys, bGroup, acc->indexB, p ),
+					  ParticleOrGroupVelocity( sys, aGroup, acc->indexA, p ) );
+	float vn = b2Dot( v, n );
+	if ( vn >= 0.0f )
+	{
+		return;
+	}
+	float invMassA, invInertiaA, tangentDistanceA;
+	float invMassB, invInertiaB, tangentDistanceB;
+	InitDampingParameterGroupOrParticle( sys, &invMassA, &invInertiaA, &tangentDistanceA, aRigid, aGroup,
+										 acc->indexA, p, n );
+	InitDampingParameterGroupOrParticle( sys, &invMassB, &invInertiaB, &tangentDistanceB, bRigid, bGroup,
+										 acc->indexB, p, n );
+	float w = acc->wSum / (float)acc->count;
+	if ( w > 1.0f )
+	{
+		w = 1.0f;
+	}
+	float f = damping * w *
+			  ComputeDampingImpulse( invMassA, invInertiaA, tangentDistanceA, invMassB, invInertiaB,
+									 tangentDistanceB, vn );
+	ApplyRigidDamping( sys, invMassA, invInertiaA, tangentDistanceA, aRigid, aGroup, acc->indexA, f, n );
+	ApplyRigidDamping( sys, invMassB, invInertiaB, tangentDistanceB, bRigid, bGroup, acc->indexB, -f, n );
+}
+
+static void SolveRigidDamping( lfParticleSystem* sys )
+{
+	if ( ( sys->allGroupFlags & lf_rigidParticleGroup ) == 0 )
+	{
+		return;
+	}
+	float damping = sys->def.dampingStrength;
+	for ( int k = 0; k < sys->bodyContactCount; k++ )
+	{
+		const lfBodyContact* c = &sys->bodyContacts[k];
+		int a = (int)c->index;
+		lfParticleGroup* aGroup = ParticleGroupOrNull( sys, a );
+		if ( !aGroup || ( aGroup->groupFlags & lf_rigidParticleGroup ) == 0 )
+		{
+			continue;
+		}
+		b2Vec2 n = c->normal;
+		b2Vec2 p = ( (b2Vec2){ sys->posX[a], sys->posY[a] } );
+		b2Vec2 v = b2Sub( LfBodyGetWorldPointVelocity( sys, c->bodyId, p ), GroupVelocityAt( aGroup, p ) );
+		float vn = b2Dot( v, n );
+		if ( vn >= 0.0f )
+		{
+			continue;
+		}
+		float invMassA, invInertiaA, tangentDistanceA;
+		float invMassB, invInertiaB, tangentDistanceB;
+		InitDampingParameterGroupOrParticle( sys, &invMassA, &invInertiaA, &tangentDistanceA, true, aGroup, a, p, n );
+		float bm = 0.0f;
+		float bI = 0.0f;
+		b2Vec2 bodyCenter = ( b2Vec2 ){ 0.0f, 0.0f };
+		if ( LfBodyGetType( sys, c->bodyId ) == b2_dynamicBody )
+		{
+			bm = LfBodyGetMass( sys, c->bodyId );
+			bI = LfBodyGetRotationalInertia( sys, c->bodyId );
+			bodyCenter = LfBodyGetWorldCenter( sys, c->bodyId );
+		}
+		InitDampingParameter( &invMassB, &invInertiaB, &tangentDistanceB, bm, bI, bodyCenter, p, n );
+		float w = c->weight < 1.0f ? c->weight : 1.0f;
+		float f = damping * w * ComputeDampingImpulse( invMassA, invInertiaA, tangentDistanceA, invMassB, invInertiaB,
+													   tangentDistanceB, vn );
+		ApplyRigidDamping( sys, invMassA, invInertiaA, tangentDistanceA, true, aGroup, a, f, n );
+		LfBodyApplyLinearImpulse( sys, c->bodyId, b2MulSV( -f, n ), p );
+	}
+	lfSolidPairAcc solidPairs[LF_SOLID_PAIR_CAP];
+	int solidPairN = 0;
+	for ( int k = 0; k < sys->particleContactCount; k++ )
+	{
+		const lfParticleContact* c = &sys->particleContacts[k];
+		int a = (int)c->a;
+		int b = (int)c->b;
+		lfParticleGroup* aGroup = ParticleGroupOrNull( sys, a );
+		lfParticleGroup* bGroup = ParticleGroupOrNull( sys, b );
+		bool aRigid = aGroup && ( aGroup->groupFlags & lf_rigidParticleGroup ) != 0;
+		bool bRigid = bGroup && ( bGroup->groupFlags & lf_rigidParticleGroup ) != 0;
+		if ( aGroup == bGroup || ( !aRigid && !bRigid ) )
+		{
+			continue;
+		}
+		if ( aGroup && bGroup && ( aGroup->groupFlags & lf_solidParticleGroup ) != 0 &&
+			 ( bGroup->groupFlags & lf_solidParticleGroup ) != 0 )
+		{
+			int ga = sys->groupIndex[a];
+			int gb = sys->groupIndex[b];
+			b2Vec2 n = c->normal;
+			int ia = a;
+			int ib = b;
+			if ( ga > gb )
+			{
+				int tmp = ga;
+				ga = gb;
+				gb = tmp;
+				tmp = ia;
+				ia = ib;
+				ib = tmp;
+				n = b2Neg( n );
+			}
+			b2Vec2 pa = ( (b2Vec2){ sys->posX[a], sys->posY[a] } );
+			b2Vec2 pb = ( (b2Vec2){ sys->posX[b], sys->posY[b] } );
+			b2Vec2 p = b2MulSV( 0.5f, b2Add( pa, pb ) );
+			float w = c->weight > 0.0f ? c->weight : 0.0f;
+			int slot = FindSolidPair( solidPairs, solidPairN, ga, gb );
+			if ( slot < 0 )
+			{
+				if ( solidPairN >= LF_SOLID_PAIR_CAP )
+				{
+					continue;
+				}
+				slot = solidPairN++;
+				solidPairs[slot].gidA = ga;
+				solidPairs[slot].gidB = gb;
+				solidPairs[slot].indexA = ia;
+				solidPairs[slot].indexB = ib;
+				solidPairs[slot].count = 0;
+				solidPairs[slot].nSum = ( b2Vec2 ){ 0.0f, 0.0f };
+				solidPairs[slot].pSum = ( b2Vec2 ){ 0.0f, 0.0f };
+				solidPairs[slot].wSum = 0.0f;
+			}
+			solidPairs[slot].count++;
+			solidPairs[slot].nSum = b2Add( solidPairs[slot].nSum, b2MulSV( w, n ) );
+			solidPairs[slot].pSum = b2Add( solidPairs[slot].pSum, b2MulSV( w, p ) );
+			solidPairs[slot].wSum += w;
+			continue;
+		}
+		b2Vec2 n = c->normal;
+		b2Vec2 pa = ( (b2Vec2){ sys->posX[a], sys->posY[a] } );
+		b2Vec2 pb = ( (b2Vec2){ sys->posX[b], sys->posY[b] } );
+		b2Vec2 p = b2MulSV( 0.5f, b2Add( pa, pb ) );
+		b2Vec2 v = b2Sub( ParticleOrGroupVelocity( sys, bGroup, b, p ), ParticleOrGroupVelocity( sys, aGroup, a, p ) );
+		float vn = b2Dot( v, n );
+		if ( vn >= 0.0f )
+		{
+			continue;
+		}
+		float invMassA, invInertiaA, tangentDistanceA;
+		float invMassB, invInertiaB, tangentDistanceB;
+		InitDampingParameterGroupOrParticle( sys, &invMassA, &invInertiaA, &tangentDistanceA, aRigid, aGroup, a, p, n );
+		InitDampingParameterGroupOrParticle( sys, &invMassB, &invInertiaB, &tangentDistanceB, bRigid, bGroup, b, p, n );
+		float f = damping * c->weight *
+				  ComputeDampingImpulse( invMassA, invInertiaA, tangentDistanceA, invMassB, invInertiaB,
+										 tangentDistanceB, vn );
+		ApplyRigidDamping( sys, invMassA, invInertiaA, tangentDistanceA, aRigid, aGroup, a, f, n );
+		ApplyRigidDamping( sys, invMassB, invInertiaB, tangentDistanceB, bRigid, bGroup, b, -f, n );
+	}
+	for ( int i = 0; i < solidPairN; i++ )
+	{
+		ApplySolidPairDamping( sys, damping, &solidPairs[i] );
+	}
+}
+
 static void SolveRigid( lfParticleSystem* sys, float dt )
 {
 	if ( ( sys->allGroupFlags & lf_rigidParticleGroup ) == 0 || dt <= 0.0f )
@@ -4057,6 +4635,10 @@ const float* lfParticleSystem_GetWeightBuffer( const lfParticleSystem* sys )
 
 void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 {
+	sys->overlapAabbCalls = 0;
+	sys->applyImpulseCalls = 0;
+	sys->worldPointVelocityCalls = 0;
+	sys->bodyPropCalls = 0;
 	if ( sys->count == 0 )
 	{
 		return;
@@ -4079,6 +4661,7 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 	}
 
 	float subDt = dt / (float)subStepCount;
+	float queryDt = sys->reuseQueryAcrossSubsteps ? dt : subDt;
 
 	for ( int step = 0; step < subStepCount; step++ )
 	{
@@ -4087,7 +4670,11 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 		// One shared broad-phase query for both FindBodyContacts (below) and
 		// SolveCollision (later this sub-step) - swept-cloud AABB is a proven
 		// superset of the static-cloud AABB FindBodyContacts alone would need.
-		CollectOverlappingShapes( sys, ComputeSweptCloudAABB( sys, subDt, sys->diameter ) );
+		// H14 (opt-in): query once with full dt on sub-step 0, reuse queryShapes.
+		if ( step == 0 || !sys->reuseQueryAcrossSubsteps )
+		{
+			CollectOverlappingShapes( sys, ComputeSweptCloudAABB( sys, queryDt, sys->diameter ) );
+		}
 		FindBodyContacts( sys );
 		if ( sys->def.strictContactCheck )
 		{
@@ -4122,6 +4709,11 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 			SolveSpring( sys, subDt );
 		}
 		LimitVelocity( sys, subDt );
+		if ( ( sys->allGroupFlags & lf_rigidParticleGroup ) != 0 )
+		{
+			UpdateGroupStatistics( sys );
+			SolveRigidDamping( sys );
+		}
 		SolveBarrier( sys, subDt );
 		SolveCollision( sys, subDt );
 		if ( ( sys->allGroupFlags & lf_rigidParticleGroup ) != 0 )
@@ -4137,6 +4729,64 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 // ------------------------------------------------------------------------
 // Accessors
 // ------------------------------------------------------------------------
+
+// ------------------------------------------------------------------------
+// Accessors
+// ------------------------------------------------------------------------
+
+int lfParticleSystem_GetBodyContactCount( const lfParticleSystem* sys )
+{
+	return sys != NULL ? sys->bodyContactCount : 0;
+}
+
+int lfParticleSystem_GetQueryShapeCount( const lfParticleSystem* sys )
+{
+	return sys != NULL ? sys->queryShapeCount : 0;
+}
+
+int lfParticleSystem_GetOverlapAabbCalls( const lfParticleSystem* sys )
+{
+	return sys != NULL ? sys->overlapAabbCalls : 0;
+}
+
+int lfParticleSystem_GetApplyImpulseCalls( const lfParticleSystem* sys )
+{
+	return sys != NULL ? sys->applyImpulseCalls : 0;
+}
+
+int lfParticleSystem_GetWorldPointVelocityCalls( const lfParticleSystem* sys )
+{
+	return sys != NULL ? sys->worldPointVelocityCalls : 0;
+}
+
+int lfParticleSystem_GetBodyPropCalls( const lfParticleSystem* sys )
+{
+	return sys != NULL ? sys->bodyPropCalls : 0;
+}
+
+void lfParticleSystem_SetSkipBodyImpulse( lfParticleSystem* sys, int skip )
+{
+	if ( sys != NULL )
+	{
+		sys->skipBodyImpulse = skip != 0;
+	}
+}
+
+void lfParticleSystem_SetSkipBodyVelocity( lfParticleSystem* sys, int skip )
+{
+	if ( sys != NULL )
+	{
+		sys->skipBodyVelocity = skip != 0;
+	}
+}
+
+void lfParticleSystem_SetReuseQueryAcrossSubsteps( lfParticleSystem* sys, int reuse )
+{
+	if ( sys != NULL )
+	{
+		sys->reuseQueryAcrossSubsteps = reuse != 0;
+	}
+}
 
 int lfParticleSystem_GetParticleCount( const lfParticleSystem* sys )
 {
