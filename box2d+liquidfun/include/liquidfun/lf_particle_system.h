@@ -288,6 +288,7 @@ B2_API float lfParticleSystem_GetPassMs( const lfParticleSystem* system, int id 
 B2_API int lfParticleSystem_GetParticleContactCount( const lfParticleSystem* system );
 B2_API void lfParticleSystem_SetSkipPass( lfParticleSystem* system, int id, int skip );
 B2_API void lfParticleSystem_SetReuseParticleContacts( lfParticleSystem* system, int reuse );
+B2_API void lfParticleSystem_SetPassProfile( lfParticleSystem* system, int enabled );
 
 // ----------------------------------------------------------------------
 // Accessors (read-only views into the internal SoA buffers).

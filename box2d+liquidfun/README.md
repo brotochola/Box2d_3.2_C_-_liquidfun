@@ -59,19 +59,25 @@ gdef.strength = 0.4f;
 lfParticleSystem_CreateParticleGroupCircle(water, &gdef);
 ```
 
-Set `growable = false` (and a hard `maxParticles`) when binding position
-buffers as WASM SharedArrayBuffer views — realloc would detach those views.
+Use `growable = false` and set `maxParticles` to the required hard cap for
+LiquidFun systems in this project. This also keeps WASM SharedArrayBuffer
+views stable; particle creation returns `-1` when the cap is reached.
 
 ## Qué incluye
 
 - Partículas de agua (`lf_waterParticle`) con presión tipo WCSPH simplificada.
-- Flags `lf_viscousParticle`, `lf_tensileParticle`, `lf_wallParticle`,
-  `lf_elasticParticle`.
-- Grupos de partículas con shape matching 2D (centro de masa + ángulo).
+- Flags de viscosidad, tensión superficial, pared, elasticidad, polvo,
+  resortes, barreras, presión estática, mezcla de color, repulsión y
+  recaptura reactiva.
+- Grupos sólidos, rígidos y elásticos; creación por caja/círculo, extracción,
+  unión y división de grupos, además de duración de vida y desvanecimiento
+  opcional.
 - Colisión y acoplamiento bidireccional con shapes de Box2D vía API pública.
-- Grid espacial por hashing; contactos partícula-cuerpo invertidos
-  (un OverlapAABB del cloud, luego grid vs shapes).
+- Grid espacial por hashing, consultas de partículas por AABB/raycast y
+  contactos partícula-cuerpo con impulsos aplicados a los cuerpos.
+- Búsqueda paralela de contactos partícula-partícula mediante el scheduler
+  compartido de Box2D, con SIMD en las rutas compatibles.
 - Demos headless: `examples/demo_water.c`, `examples/demo_elastic.c`.
 
-Lo que falta (ver ROADMAP.md): `spring`/`powder`/`barrier`, color mixing,
-static pressure, lifetimes, colisión continua, paralelización.
+Ver `ROADMAP.md` para la arquitectura, los límites conocidos y el estado de
+las optimizaciones.

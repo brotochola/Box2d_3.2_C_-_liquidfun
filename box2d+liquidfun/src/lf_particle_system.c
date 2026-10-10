@@ -423,11 +423,21 @@ struct lfParticleSystem
 	int reuseQueryAcrossSubsteps;
 	int reuseParticleContacts;
 	int skipPassMask;
+	int passProfile;
 	float passMs[LF_PASS_COUNT];
 };
 
+static void LfPassBegin( lfParticleSystem* sys, double* t0 )
+{
+	*t0 = sys->passProfile ? LfNowMs() : 0.0;
+}
+
 static void LfAccPass( lfParticleSystem* sys, int id, double t0 )
 {
+	if ( !sys->passProfile )
+	{
+		return;
+	}
 	sys->passMs[id] += (float)( LfNowMs() - t0 );
 }
 
@@ -465,6 +475,33 @@ static uint32_t HashCell( int ix, int iy, int hashSize )
 {
 	uint32_t h = ( (uint32_t)ix * 92837111u ) ^ ( (uint32_t)iy * 689287499u );
 	return h & (uint32_t)( hashSize - 1 );
+}
+
+static inline uint16_t GetNeighborBuckets( int ix, int iy, int hashSize, uint32_t buckets[9] )
+{
+	int index = 0;
+	for ( int dy = -1; dy <= 1; dy++ )
+	{
+		for ( int dx = -1; dx <= 1; dx++ )
+		{
+			buckets[index++] = HashCell( ix + dx, iy + dy, hashSize );
+		}
+	}
+
+	// With these hash multipliers and power-of-two sizes, only diagonal neighbor
+	// offsets can alias. Mark both queries so only those candidates need a cell check.
+	uint16_t aliasMask = 0;
+	if ( buckets[0] == buckets[4] ) aliasMask |= ( 1u << 0 ) | ( 1u << 4 );
+	if ( buckets[0] == buckets[8] ) aliasMask |= ( 1u << 0 ) | ( 1u << 8 );
+	if ( buckets[1] == buckets[3] ) aliasMask |= ( 1u << 1 ) | ( 1u << 3 );
+	if ( buckets[1] == buckets[5] ) aliasMask |= ( 1u << 1 ) | ( 1u << 5 );
+	if ( buckets[2] == buckets[4] ) aliasMask |= ( 1u << 2 ) | ( 1u << 4 );
+	if ( buckets[2] == buckets[6] ) aliasMask |= ( 1u << 2 ) | ( 1u << 6 );
+	if ( buckets[3] == buckets[7] ) aliasMask |= ( 1u << 3 ) | ( 1u << 7 );
+	if ( buckets[4] == buckets[6] ) aliasMask |= ( 1u << 4 ) | ( 1u << 6 );
+	if ( buckets[4] == buckets[8] ) aliasMask |= ( 1u << 4 ) | ( 1u << 8 );
+	if ( buckets[5] == buckets[7] ) aliasMask |= ( 1u << 5 ) | ( 1u << 7 );
+	return aliasMask;
 }
 
 static void GetCell( const lfParticleSystem* sys, b2Vec2 p, int* ix, int* iy )
@@ -2261,13 +2298,26 @@ static void FindContactsRange( int start, int end, int workerIndex, void* contex
 	{
 		int ix = sys->cellX[i];
 		int iy = sys->cellY[i];
+		uint32_t buckets[9];
+		uint16_t aliasMask = GetNeighborBuckets( ix, iy, sys->hashSize, buckets );
+		int index = 0;
 		for ( int dy = -1; dy <= 1; dy++ )
 		{
-			for ( int dx = -1; dx <= 1; dx++ )
+			for ( int dx = -1; dx <= 1; dx++, index++ )
 			{
-				uint32_t cell = HashCell( ix + dx, iy + dy, sys->hashSize );
-				for ( uint16_t j = sys->cellHead[cell]; j != LF_EMPTY_PARTICLE; j = sys->next[j] )
+				uint32_t bucket = buckets[index];
+				uint16_t head = sys->cellHead[bucket];
+				if ( head == LF_EMPTY_PARTICLE )
 				{
+					continue;
+				}
+				int filterCell = ( aliasMask & (uint16_t)( 1u << index ) ) != 0;
+				for ( uint16_t j = head; j != LF_EMPTY_PARTICLE; j = sys->next[j] )
+				{
+					if ( filterCell && ( sys->cellX[j] != ix + dx || sys->cellY[j] != iy + dy ) )
+					{
+						continue;
+					}
 					if ( (int)j <= i )
 					{
 						continue;
@@ -2324,13 +2374,26 @@ static void FindParticleContacts( lfParticleSystem* sys )
 		{
 			int ix = sys->cellX[i];
 			int iy = sys->cellY[i];
+			uint32_t buckets[9];
+			uint16_t aliasMask = GetNeighborBuckets( ix, iy, sys->hashSize, buckets );
+			int index = 0;
 			for ( int dy = -1; dy <= 1; dy++ )
 			{
-				for ( int dx = -1; dx <= 1; dx++ )
+				for ( int dx = -1; dx <= 1; dx++, index++ )
 				{
-					uint32_t cell = HashCell( ix + dx, iy + dy, sys->hashSize );
-					for ( uint16_t j = sys->cellHead[cell]; j != LF_EMPTY_PARTICLE; j = sys->next[j] )
+					uint32_t bucket = buckets[index];
+					uint16_t head = sys->cellHead[bucket];
+					if ( head == LF_EMPTY_PARTICLE )
 					{
+						continue;
+					}
+					int filterCell = ( aliasMask & (uint16_t)( 1u << index ) ) != 0;
+					for ( uint16_t j = head; j != LF_EMPTY_PARTICLE; j = sys->next[j] )
+					{
+						if ( filterCell && ( sys->cellX[j] != ix + dx || sys->cellY[j] != iy + dy ) )
+						{
+							continue;
+						}
 						if ( (int)j <= i )
 						{
 							continue;
@@ -4689,7 +4752,8 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 	}
 
 	{
-		double t0 = LfNowMs();
+		double t0;
+		LfPassBegin( sys, &t0 );
 		if ( !LfSkipPass( sys, LF_PASS_REST ) )
 		{
 			SolveLifetime( sys, dt );
@@ -4713,7 +4777,8 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 	for ( int step = 0; step < subStepCount; step++ )
 	{
 		{
-			double t0 = LfNowMs();
+			double t0;
+		LfPassBegin( sys, &t0 );
 			if ( !LfSkipPass( sys, LF_PASS_GRID ) )
 			{
 				BuildGrid( sys );
@@ -4721,7 +4786,8 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 			LfAccPass( sys, LF_PASS_GRID, t0 );
 		}
 		{
-			double t0 = LfNowMs();
+			double t0;
+		LfPassBegin( sys, &t0 );
 			if ( !LfSkipPass( sys, LF_PASS_FIND_CONTACTS ) && !sys->reuseParticleContacts )
 			{
 				FindParticleContacts( sys );
@@ -4733,7 +4799,8 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 		// superset of the static-cloud AABB FindBodyContacts alone would need.
 		// H14 (opt-in): query once with full dt on sub-step 0, reuse queryShapes.
 		{
-			double t0 = LfNowMs();
+			double t0;
+		LfPassBegin( sys, &t0 );
 			if ( !LfSkipPass( sys, LF_PASS_BODY ) )
 			{
 				if ( step == 0 || !sys->reuseQueryAcrossSubsteps )
@@ -4749,7 +4816,8 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 			LfAccPass( sys, LF_PASS_BODY, t0 );
 		}
 		{
-			double t0 = LfNowMs();
+			double t0;
+		LfPassBegin( sys, &t0 );
 			if ( !LfSkipPass( sys, LF_PASS_WEIGHT ) )
 			{
 				ComputeWeight( sys );
@@ -4757,7 +4825,8 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 			LfAccPass( sys, LF_PASS_WEIGHT, t0 );
 		}
 		{
-			double t0 = LfNowMs();
+			double t0;
+		LfPassBegin( sys, &t0 );
 			if ( !LfSkipPass( sys, LF_PASS_REST ) )
 			{
 				ComputeDepth( sys );
@@ -4769,7 +4838,8 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 			LfAccPass( sys, LF_PASS_REST, t0 );
 		}
 		{
-			double t0 = LfNowMs();
+			double t0;
+		LfPassBegin( sys, &t0 );
 			if ( !LfSkipPass( sys, LF_PASS_CONTACT_SOLVERS ) )
 			{
 				SolveForce( sys, subDt );
@@ -4781,7 +4851,8 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 			LfAccPass( sys, LF_PASS_CONTACT_SOLVERS, t0 );
 		}
 		{
-			double t0 = LfNowMs();
+			double t0;
+		LfPassBegin( sys, &t0 );
 			if ( !LfSkipPass( sys, LF_PASS_REST ) )
 			{
 				if ( ( sys->allGroupFlags & lf_solidParticleGroup ) != 0 )
@@ -4794,7 +4865,8 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 			LfAccPass( sys, LF_PASS_REST, t0 );
 		}
 		{
-			double t0 = LfNowMs();
+			double t0;
+		LfPassBegin( sys, &t0 );
 			if ( !LfSkipPass( sys, LF_PASS_STATIC_PRESSURE ) )
 			{
 				SolveStaticPressure( sys, subDt );
@@ -4802,7 +4874,8 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 			LfAccPass( sys, LF_PASS_STATIC_PRESSURE, t0 );
 		}
 		{
-			double t0 = LfNowMs();
+			double t0;
+		LfPassBegin( sys, &t0 );
 			if ( !LfSkipPass( sys, LF_PASS_PRESSURE ) )
 			{
 				SolvePressure( sys, subDt );
@@ -4810,7 +4883,8 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 			LfAccPass( sys, LF_PASS_PRESSURE, t0 );
 		}
 		{
-			double t0 = LfNowMs();
+			double t0;
+		LfPassBegin( sys, &t0 );
 			if ( !LfSkipPass( sys, LF_PASS_CONTACT_SOLVERS ) )
 			{
 				SolveDamping( sys, subDt );
@@ -4818,7 +4892,8 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 			LfAccPass( sys, LF_PASS_CONTACT_SOLVERS, t0 );
 		}
 		{
-			double t0 = LfNowMs();
+			double t0;
+		LfPassBegin( sys, &t0 );
 			if ( !LfSkipPass( sys, LF_PASS_REST ) )
 			{
 				if ( sys->hasShapeGroups ||
@@ -4838,7 +4913,8 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 			LfAccPass( sys, LF_PASS_REST, t0 );
 		}
 		{
-			double t0 = LfNowMs();
+			double t0;
+		LfPassBegin( sys, &t0 );
 			if ( !LfSkipPass( sys, LF_PASS_BODY ) )
 			{
 				SolveBarrier( sys, subDt );
@@ -4847,7 +4923,8 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 			LfAccPass( sys, LF_PASS_BODY, t0 );
 		}
 		{
-			double t0 = LfNowMs();
+			double t0;
+		LfPassBegin( sys, &t0 );
 			if ( !LfSkipPass( sys, LF_PASS_REST ) )
 			{
 				if ( ( sys->allGroupFlags & lf_rigidParticleGroup ) != 0 )
@@ -4858,7 +4935,8 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 			LfAccPass( sys, LF_PASS_REST, t0 );
 		}
 		{
-			double t0 = LfNowMs();
+			double t0;
+		LfPassBegin( sys, &t0 );
 			if ( !LfSkipPass( sys, LF_PASS_BODY ) )
 			{
 				SolveWall( sys );
@@ -4866,7 +4944,8 @@ void lfParticleSystem_Step( lfParticleSystem* sys, float dt, int subStepCount )
 			LfAccPass( sys, LF_PASS_BODY, t0 );
 		}
 		{
-			double t0 = LfNowMs();
+			double t0;
+		LfPassBegin( sys, &t0 );
 			if ( !LfSkipPass( sys, LF_PASS_REST ) )
 			{
 				Integrate( sys, subDt );
@@ -4974,6 +5053,14 @@ void lfParticleSystem_SetReuseParticleContacts( lfParticleSystem* sys, int reuse
 	if ( sys != NULL )
 	{
 		sys->reuseParticleContacts = reuse != 0;
+	}
+}
+
+void lfParticleSystem_SetPassProfile( lfParticleSystem* sys, int enabled )
+{
+	if ( sys != NULL )
+	{
+		sys->passProfile = enabled != 0;
 	}
 }
 
