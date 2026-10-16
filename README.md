@@ -447,6 +447,19 @@ Box2d_3.2_C_-_liquidfun/
 
 ---
 
+## Updating upstream Box2D
+
+`box2d/` is a git subtree of [erincatto/box2d](https://github.com/erincatto/box2d). The pin is recorded in `BOX2D_UPSTREAM.txt`. The highest `v3.*` tag is v3.1.1, which is older than this tree, so the pin is the 3.2.0 commit on `main`, not a floating branch.
+
+Weed's only edit inside upstream files is `patches/weed-state-export.patch` (pose export during integrate, plus `state_export.c`). `box2d/src/wasm_wrapper.c` is ours and is not in that patch. A later update is:
+
+```bat
+git subtree pull --prefix=box2d upstream <sha> --squash
+git apply --3way patches/weed-state-export.patch
+```
+
+Then fix `lfBindBox2dWorld` if `b2World` task fields moved, and run `weedjs\build_for_weed.bat`.
+
 ## License & Acknowledgments
 
 - **Box2D 3.2**: Copyright &copy; 2024 Erin Catto. Licensed under the [Zlib License](https://opensource.org/licenses/Zlib).

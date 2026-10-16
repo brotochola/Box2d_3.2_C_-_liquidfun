@@ -1,0 +1,169 @@
+diff --git a/box2d/src/CMakeLists.txt b/box2d/src/CMakeLists.txt
+index 2092551..6ceec06 100644
+--- a/box2d/src/CMakeLists.txt
++++ b/box2d/src/CMakeLists.txt
+@@ -69,6 +69,8 @@ set(BOX2D_SOURCE_FILES
+ 	solver_set.h
+ 	solver.c
+ 	solver.h
++	state_export.c
++	state_export.h
+ 	table.c
+ 	table.h
+ 	timer.c
+diff --git a/box2d/src/solver.c b/box2d/src/solver.c
+index d275ce7..831b376 100644
+--- a/box2d/src/solver.c
++++ b/box2d/src/solver.c
+@@ -19,6 +19,7 @@
+ #include "sensor.h"
+ #include "shape.h"
+ #include "solver_set.h"
++#include "state_export.h"
+ 
+ #include <limits.h>
+ #include <stdbool.h>
+@@ -623,6 +624,14 @@ static void b2FinalizeBodiesTask( int startIndex, int endIndex, int workerIndex,
+ 		moveEvents[simIndex].bodyId = (b2BodyId){ sim->bodyId + 1, worldId, body->generation };
+ 		moveEvents[simIndex].userData = body->userData;
+ 		moveEvents[simIndex].fellAsleep = false;
++		{
++			intptr_t exportSlot = (intptr_t)body->userData;
++			int exportCapacity = b2GetStateExportCapacity();
++			if ( exportSlot >= 0 && exportSlot < exportCapacity )
++			{
++				b2ExportBodyState( (int)exportSlot, sim->transform, v, w );
++			}
++		}
+ 
+ 		// reset applied force and torque
+ 		sim->force = b2Vec2_zero;
+diff --git a/box2d/src/state_export.c b/box2d/src/state_export.c
+new file mode 100644
+index 0000000..94739af
+--- /dev/null
++++ b/box2d/src/state_export.c
+@@ -0,0 +1,87 @@
++// SPDX-FileCopyrightText: 2023 Erin Catto
++// SPDX-License-Identifier: MIT
++
++#include "state_export.h"
++
++static float* g_channels[B2_STATE_EXPORT_CHANNELS];
++static uint8_t* g_sleeping = NULL;
++static int g_capacity;
++
++int b2GetStateExportCapacity( void )
++{
++	return g_capacity;
++}
++
++void b2BindWeedExport( float* x, float* y, float* rotation, float* vx, float* vy, float* angularVelocity,
++					   float* rotC, float* rotS, uint8_t* sleeping, int entityCapacity )
++{
++	g_capacity = entityCapacity;
++	g_channels[b2_weed_x] = x;
++	g_channels[b2_weed_y] = y;
++	g_channels[b2_weed_rotation] = rotation;
++	g_channels[b2_weed_vx] = vx;
++	g_channels[b2_weed_vy] = vy;
++	g_channels[b2_weed_angular_velocity] = angularVelocity;
++	g_channels[b2_weed_rot_c] = rotC;
++	g_channels[b2_weed_rot_s] = rotS;
++	g_sleeping = sleeping;
++	if ( entityCapacity <= 0 )
++	{
++		for ( int i = 0; i < B2_STATE_EXPORT_CHANNELS; ++i )
++		{
++			g_channels[i] = NULL;
++		}
++		g_sleeping = NULL;
++		g_capacity = 0;
++	}
++}
++
++void b2BindStateExportBuffer( float* buffer, int bodyCount )
++{
++	if ( buffer == NULL || bodyCount <= 0 )
++	{
++		b2BindWeedExport( NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0 );
++		return;
++	}
++
++	b2BindWeedExport( buffer + 0 * bodyCount, buffer + 1 * bodyCount, buffer + 2 * bodyCount, buffer + 3 * bodyCount,
++					  buffer + 4 * bodyCount, buffer + 5 * bodyCount, buffer + 6 * bodyCount, buffer + 7 * bodyCount, NULL,
++					  bodyCount );
++}
++
++void b2ExportBodySleeping( int entityIndex, int sleeping )
++{
++	if ( g_sleeping == NULL || entityIndex < 0 || entityIndex >= g_capacity )
++	{
++		return;
++	}
++	g_sleeping[entityIndex] = sleeping ? 1 : 0;
++}
++
++void b2ExportBodyState( int entityIndex, b2WorldTransform transform, b2Vec2 linearVelocity, float angularVelocity )
++{
++	if ( g_channels[b2_weed_x] == NULL || entityIndex < 0 || entityIndex >= g_capacity )
++	{
++		return;
++	}
++
++	g_channels[b2_weed_x][entityIndex] = transform.p.x;
++	g_channels[b2_weed_y][entityIndex] = transform.p.y;
++	/* Angle for JS API; facing for render stays in rotC/rotS. */
++	if ( g_channels[b2_weed_rotation] != NULL )
++	{
++		g_channels[b2_weed_rotation][entityIndex] = b2Atan2( transform.q.s, transform.q.c );
++	}
++	g_channels[b2_weed_vx][entityIndex] = linearVelocity.x;
++	g_channels[b2_weed_vy][entityIndex] = linearVelocity.y;
++	g_channels[b2_weed_angular_velocity][entityIndex] = angularVelocity;
++	if ( g_channels[b2_weed_rot_c] != NULL )
++	{
++		g_channels[b2_weed_rot_c][entityIndex] = transform.q.c;
++	}
++	if ( g_channels[b2_weed_rot_s] != NULL )
++	{
++		g_channels[b2_weed_rot_s][entityIndex] = transform.q.s;
++	}
++	b2ExportBodySleeping( entityIndex, 0 );
++}
+diff --git a/box2d/src/state_export.h b/box2d/src/state_export.h
+new file mode 100644
+index 0000000..b360b13
+--- /dev/null
++++ b/box2d/src/state_export.h
+@@ -0,0 +1,30 @@
++// SPDX-FileCopyrightText: 2023 Erin Catto
++// SPDX-License-Identifier: MIT
++
++#pragma once
++
++#include "box2d/math_functions.h"
++
++#include <stdint.h>
++
++/* WeedJS-shaped SoA: x, y, rotation(rad), vx, vy, angularVelocity, rotC, rotS */
++#define B2_STATE_EXPORT_CHANNELS 8
++
++enum b2WeedStateChannel
++{
++	b2_weed_x = 0,
++	b2_weed_y = 1,
++	b2_weed_rotation = 2,
++	b2_weed_vx = 3,
++	b2_weed_vy = 4,
++	b2_weed_angular_velocity = 5,
++	b2_weed_rot_c = 6,
++	b2_weed_rot_s = 7,
++};
++
++void b2BindStateExportBuffer( float* buffer, int bodyCount );
++void b2BindWeedExport( float* x, float* y, float* rotation, float* vx, float* vy, float* angularVelocity,
++					   float* rotC, float* rotS, uint8_t* sleeping, int entityCapacity );
++int b2GetStateExportCapacity( void );
++void b2ExportBodyState( int entityIndex, b2WorldTransform transform, b2Vec2 linearVelocity, float angularVelocity );
++void b2ExportBodySleeping( int entityIndex, int sleeping );

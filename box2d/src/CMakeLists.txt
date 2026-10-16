@@ -69,6 +69,8 @@ set(BOX2D_SOURCE_FILES
 	solver_set.h
 	solver.c
 	solver.h
+	state_export.c
+	state_export.h
 	table.c
 	table.h
 	timer.c

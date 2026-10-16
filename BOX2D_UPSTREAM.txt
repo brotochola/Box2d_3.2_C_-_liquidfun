@@ -1,0 +1,6 @@
+pin: ac7c751eaeddbabdc1c4d41ae4f3a25d78627790
+source: upstream/main
+cmake: 3.2.0
+highest v3 tag: v3.1.1 8c661469c9507d3ad6fbd2fea3f1aa71669c2fe3
+note: v3.1.1 is older than the copied tree this pin replaced. Later updates should take a newer main SHA or a v3.2 tag when one exists, then reapply patches/weed-state-export.patch.
+weed rev A before wasm rebuild: 7322d7e6727c461af8bb3f3eda3db514c80c3efb

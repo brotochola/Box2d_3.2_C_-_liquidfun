@@ -19,6 +19,7 @@
 #include "sensor.h"
 #include "shape.h"
 #include "solver_set.h"
+#include "state_export.h"
 
 #include <limits.h>
 #include <stdbool.h>
@@ -623,6 +624,14 @@ static void b2FinalizeBodiesTask( int startIndex, int endIndex, int workerIndex,
 		moveEvents[simIndex].bodyId = (b2BodyId){ sim->bodyId + 1, worldId, body->generation };
 		moveEvents[simIndex].userData = body->userData;
 		moveEvents[simIndex].fellAsleep = false;
+		{
+			intptr_t exportSlot = (intptr_t)body->userData;
+			int exportCapacity = b2GetStateExportCapacity();
+			if ( exportSlot >= 0 && exportSlot < exportCapacity )
+			{
+				b2ExportBodyState( (int)exportSlot, sim->transform, v, w );
+			}
+		}
 
 		// reset applied force and torque
 		sim->force = b2Vec2_zero;
