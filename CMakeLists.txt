@@ -1,0 +1,169 @@
+﻿cmake_minimum_required(VERSION 3.22)
+include(CMakeDependentOption)
+
+project(box2d
+	VERSION 3.2.0
+	DESCRIPTION "A 2D physics engine for games"
+	HOMEPAGE_URL "https://box2d.org"
+	LANGUAGES C CXX
+)
+
+# stuff to help debug cmake
+# message(STATUS "cmake tool chain: ${CMAKE_TOOLCHAIN_FILE}")
+# message(STATUS "cmake source dir: ${CMAKE_SOURCE_DIR}")
+# message(STATUS "library postfix: ${CMAKE_DEBUG_POSTFIX}")
+message(STATUS "CMake C compiler: ${CMAKE_C_COMPILER_ID}")
+message(STATUS "CMake C++ compiler: ${CMAKE_CXX_COMPILER_ID}")
+message(STATUS "CMake system name: ${CMAKE_SYSTEM_NAME}")
+message(STATUS "CMake host system processor: ${CMAKE_HOST_SYSTEM_PROCESSOR}")
+
+# static link to make leak checking easier (_crtBreakAlloc)
+# set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+if (MSVC OR APPLE OR (UNIX AND NOT APPLE))
+	option(BOX2D_SANITIZE "Enable sanitizers for some builds" OFF)
+	if(BOX2D_SANITIZE)
+		message(STATUS "Box2D Sanitize")
+		# sanitizers need to apply to all compiled libraries to work well
+		if(MSVC)
+			# address sanitizer only in the debug build
+			add_compile_options("$<$<CONFIG:Debug>:/fsanitize=address>")
+			add_link_options("$<$<CONFIG:Debug>:/INCREMENTAL:NO>")
+		elseif(APPLE)
+			# UBSan recovers by default, no-recover makes the first report fatal so CI fails
+			add_compile_options(-fsanitize=address -fsanitize-address-use-after-scope -fsanitize=undefined -fno-sanitize-recover=all)
+			add_link_options(-fsanitize=address -fsanitize-address-use-after-scope -fsanitize=undefined)
+		elseif(UNIX)
+			# use-after-scope is clang only, leave it off so gcc builds work
+			add_compile_options(-fsanitize=address -fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+			add_link_options(-fsanitize=address -fsanitize=undefined)
+		endif()
+	else()
+		if(MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" AND PROJECT_IS_TOP_LEVEL)
+			# enable hot reloading
+			add_compile_options("$<$<CONFIG:Debug>:/ZI>")
+			add_link_options("$<$<CONFIG:Debug>:/INCREMENTAL>")
+		endif()
+	endif()
+endif()
+
+# Deterministic math
+# https://box2d.org/posts/2024/08/determinism/
+# Contraction into FMA is the one value changing transform enabled by default, and whether
+# it fires depends on the target. Test the compiler, not the platform, so every gcc and
+# clang gets the flag including a clang that is neither MinGW nor clang-cl.
+if (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+	if (CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+		# clang-cl contracts multiply add into FMA under AVX2, diverging from non FMA builds.
+		# The plain driver flag is dropped, so force it through to the frontend.
+		add_compile_options(/clang:-ffp-contract=off)
+	else()
+		add_compile_options(-ffp-contract=off)
+	endif()
+endif()
+
+option(BOX2D_DISABLE_SIMD "Disable SIMD math (slower)" OFF)
+option(BOX2D_COMPILE_WARNING_AS_ERROR "Compile warnings as errors" OFF)
+option(BOX2D_DOUBLE_PRECISION "Enable double precision for large worlds" OFF)
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+	cmake_dependent_option(BOX2D_AVX2 "Compile AVX2 kernels, selected at runtime on x86 CPUs that support them" ON "NOT BOX2D_DISABLE_SIMD" OFF)
+endif()
+
+# core.h selects the SIMD path from these definitions and dynamic_tree.h carries inline
+# SIMD code, so the unit tests, which include the src headers, must compile with the same
+# definitions and instruction set flags as the library. Selected once here for both.
+set(BOX2D_SIMD_DEFINITIONS "")
+set(BOX2D_SIMD_OPTIONS "")
+if (BOX2D_DISABLE_SIMD)
+	message(STATUS "Box2D SIMD disabled")
+	set(BOX2D_SIMD_DEFINITIONS BOX2D_DISABLE_SIMD)
+elseif (EMSCRIPTEN)
+	# core.h maps wasm onto the SSE2 path, the intrinsics only compile with simd128 enabled
+	set(BOX2D_SIMD_OPTIONS -msimd128 -msse2)
+elseif (NOT BOX2D_AVX2)
+	message(STATUS "Box2D AVX2 disabled")
+	set(BOX2D_SIMD_DEFINITIONS BOX2D_DISABLE_AVX2)
+endif()
+
+# These are read by the library build, so they must precede add_subdirectory(src),
+# otherwise the first configure and a re-configure produce different libraries.
+# Top level only, so they stay hidden from FetchContent consumers.
+if(PROJECT_IS_TOP_LEVEL)
+	option(BOX2D_PROFILE "Enable profiling with Tracy" OFF)
+	option(BOX2D_VALIDATE "Enable heavy validation" ON)
+endif()
+
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+
+# Leaving this here for testing
+# set(CMAKE_VERBOSE_MAKEFILE ON)
+
+# Emscripten pthread support. Must precede add_subdirectory(src) so the box2d library
+# objects are built with the same atomics/bulk-memory features as the executables that
+# link them, otherwise wasm-ld rejects --shared-memory. Top level only, so a FetchContent
+# consumer keeps control of its own threading model.
+if (EMSCRIPTEN AND PROJECT_IS_TOP_LEVEL)
+	set(EMSCRIPTEN_PTHREADS_COMPILER_FLAGS "-pthread -s USE_PTHREADS=1")
+	set(EMSCRIPTEN_PTHREADS_LINKER_FLAGS "${EMSCRIPTEN_PTHREADS_COMPILER_FLAGS} -s ALLOW_MEMORY_GROWTH")
+	string(APPEND CMAKE_C_FLAGS " ${EMSCRIPTEN_PTHREADS_COMPILER_FLAGS}")
+	string(APPEND CMAKE_CXX_FLAGS " ${EMSCRIPTEN_PTHREADS_COMPILER_FLAGS}")
+	string(APPEND CMAKE_EXE_LINKER_FLAGS " ${EMSCRIPTEN_PTHREADS_LINKER_FLAGS}")
+endif()
+
+add_subdirectory(src)
+
+# This hides samples, test, and doxygen from apps that use box2d via FetchContent
+if(PROJECT_IS_TOP_LEVEL)
+	option(BOX2D_SAMPLES "Build the Box2D samples" ON)
+	option(BOX2D_BENCHMARKS "Build the Box2D benchmarks" OFF)
+	option(BOX2D_DOCS "Build the Box2D documentation" OFF)
+	option(BOX2D_UNIT_TESTS "Build the Box2D unit tests" ON)
+	
+	# Needed for samples.exe to find box2d.dll
+	set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin")
+	set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin")
+
+	if(BOX2D_UNIT_TESTS OR BOX2D_SAMPLES OR BOX2D_BENCHMARKS)
+		add_subdirectory(shared)
+	endif()
+
+	# Tests need static linkage because they test internal Box2D functions
+	if(NOT BUILD_SHARED_LIBS AND BOX2D_UNIT_TESTS)
+		message(STATUS "Adding Box2D unit tests")
+		add_subdirectory(test)
+		set_target_properties(test PROPERTIES XCODE_GENERATE_SCHEME TRUE)
+	elseif(BOX2D_UNIT_TESTS)
+		message(STATUS "Skipping Box2D unit tests")
+	endif()
+
+	if(BOX2D_SAMPLES)
+		add_subdirectory(samples)
+
+		# default startup project for Visual Studio
+		if(MSVC)
+			set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT samples)
+			set_property(TARGET samples PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+		endif()
+
+		if(APPLE)
+			set_target_properties(samples PROPERTIES
+				XCODE_GENERATE_SCHEME TRUE
+				XCODE_SCHEME_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+		endif()
+	endif()
+
+	if(BOX2D_BENCHMARKS)
+		add_subdirectory(benchmark)
+		set_target_properties(benchmark PROPERTIES XCODE_GENERATE_SCHEME TRUE)
+	endif()
+
+	if(BOX2D_DOCS)
+		add_subdirectory(docs)
+	endif()
+endif()
+
+# # Building on clang in windows
+# cmake -S .. -B . -G "Visual Studio 17 2022" -A x64 -T ClangCL
+# https://clang.llvm.org/docs/UsersManual.html#clang-cl
