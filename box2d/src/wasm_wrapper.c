@@ -1,5 +1,7 @@
 // box2d/src/wasm_wrapper.c — physics glue in physics_post.js (post-js)
 #include "box2d/box2d.h"
+#include "body.h"
+#include "shape.h"
 #include "state_export.h"
 #include "liquidfun/lf_particle_system.h"
 
@@ -48,6 +50,7 @@ enum b2GameShapeType
 	b2_game_shape_box = 0,
 	b2_game_shape_circle = 1,
 	b2_game_shape_polygon = 2,
+	b2_game_shape_chain = 3,
 	/* Sentinel for bodies created without a shape (RigidBody-only). Stored as uint8_t. */
 	b2_game_shape_none = 255,
 };
@@ -67,6 +70,7 @@ enum b2GameJointFlags
 typedef struct BodySlot
 {
 	b2BodyId id;
+	b2ChainId chainId;
 	uint8_t active;
 	uint8_t shapeType;
 	uint8_t bodyType;
@@ -180,7 +184,7 @@ static int slot_from_body( b2BodyId bodyId )
 	return (int)slot;
 }
 
-static int slot_from_shape( b2ShapeId shapeId )
+static inline int slot_from_shape( b2ShapeId shapeId )
 {
 	if ( !b2Shape_IsValid( shapeId ) )
 	{
@@ -188,11 +192,6 @@ static int slot_from_shape( b2ShapeId shapeId )
 	}
 
 	b2BodyId bodyId = b2Shape_GetBody( shapeId );
-	if ( !b2Body_IsValid( bodyId ) )
-	{
-		return -1;
-	}
-
 	intptr_t slot = (intptr_t)b2Body_GetUserData( bodyId );
 	if ( slot < 0 || slot >= g_capacity )
 	{
@@ -200,6 +199,65 @@ static int slot_from_shape( b2ShapeId shapeId )
 	}
 
 	return (int)slot;
+}
+
+static b2BodyId slot_body( int slot );
+
+static void destroy_slot_chain( int slot )
+{
+	if ( slot < 0 || slot >= g_capacity )
+	{
+		return;
+	}
+	if ( B2_IS_NON_NULL( g_slots[slot].chainId ) && b2Chain_IsValid( g_slots[slot].chainId ) )
+	{
+		b2DestroyChain( g_slots[slot].chainId );
+	}
+	else if ( g_slots[slot].active )
+	{
+		b2BodyId bodyId = g_slots[slot].id;
+		if ( b2Body_IsValid( bodyId ) )
+		{
+			b2World* world = b2GetWorld( bodyId.world0 );
+			if ( world != NULL )
+			{
+				b2Body* body = b2GetBodyFullId( world, bodyId );
+				while ( body->headChainId != B2_NULL_INDEX )
+				{
+					b2ChainShape* chain = b2Array_Get( world->chainShapes, body->headChainId );
+					b2ChainId cid = { chain->id + 1, bodyId.world0, chain->generation };
+					b2DestroyChain( cid );
+				}
+			}
+		}
+	}
+	g_slots[slot].chainId = (b2ChainId){ 0 };
+}
+
+static void destroy_loose_shapes( int slot )
+{
+	b2BodyId bodyId = slot_body( slot );
+	if ( !b2Body_IsValid( bodyId ) )
+	{
+		return;
+	}
+
+	int lastCount = -1;
+	for ( int iter = 0; iter < 128; ++iter )
+	{
+		b2ShapeId shapes[32];
+		int count = b2Body_GetShapes( bodyId, shapes, 32 );
+		if ( count <= 0 || count == lastCount )
+		{
+			break;
+		}
+		lastCount = count;
+		int n = count < 32 ? count : 32;
+		for ( int i = 0; i < n; ++i )
+		{
+			b2DestroyShape( shapes[i], false );
+		}
+	}
 }
 
 static b2ShapeId first_shape( b2BodyId bodyId )
@@ -213,16 +271,35 @@ static b2ShapeId first_shape( b2BodyId bodyId )
 	return shapes[0];
 }
 
-#define WEED_SHAPE_ITER 512
-
 static void for_each_shape( b2BodyId bodyId, void ( *fn )( b2ShapeId, void* ), void* ctx )
 {
-	b2ShapeId shapes[WEED_SHAPE_ITER];
-	int total = b2Body_GetShapes( bodyId, shapes, WEED_SHAPE_ITER );
-	int n = total < WEED_SHAPE_ITER ? total : WEED_SHAPE_ITER;
-	for ( int i = 0; i < n; ++i )
+	if ( !b2Body_IsValid( bodyId ) )
 	{
-		fn( shapes[i], ctx );
+		return;
+	}
+
+	b2World* world = b2GetWorld( bodyId.world0 );
+	if ( world == NULL )
+	{
+		return;
+	}
+
+	b2Body* body = b2GetBodyFullId( world, bodyId );
+	int shapeIndex = body->headShapeId;
+	while ( shapeIndex != B2_NULL_INDEX )
+	{
+		b2ShapeId batch[32];
+		int n = 0;
+		while ( shapeIndex != B2_NULL_INDEX && n < 32 )
+		{
+			b2Shape* shape = b2Array_Get( world->shapes, shapeIndex );
+			batch[n++] = (b2ShapeId){ shape->id + 1, bodyId.world0, shape->generation };
+			shapeIndex = shape->nextShapeId;
+		}
+		for ( int i = 0; i < n; ++i )
+		{
+			fn( batch[i], ctx );
+		}
 	}
 }
 
@@ -248,7 +325,14 @@ static void apply_restitution_cb( b2ShapeId shapeId, void* ctx )
 
 static void apply_density_cb( b2ShapeId shapeId, void* ctx )
 {
-	b2Shape_SetDensity( shapeId, *(float*)ctx, true );
+	b2Shape_SetDensity( shapeId, *(float*)ctx, false );
+}
+
+static void enable_contact_events_cb( b2ShapeId shapeId, void* ctx )
+{
+	(void)ctx;
+	b2Shape_EnableContactEvents( shapeId, true );
+	b2Shape_EnableHitEvents( shapeId, true );
 }
 
 static void write_event_header_count( int index, int value )
@@ -370,14 +454,8 @@ static void export_contact_events( b2WorldId worldId )
 
 	for ( int i = 0; i < events.endCount; ++i )
 	{
-		b2ShapeId shapeA = events.endEvents[i].shapeIdA;
-		b2ShapeId shapeB = events.endEvents[i].shapeIdB;
-		if ( !b2Shape_IsValid( shapeA ) || !b2Shape_IsValid( shapeB ) )
-		{
-			continue;
-		}
-		int slotA = slot_from_shape( shapeA );
-		int slotB = slot_from_shape( shapeB );
+		int slotA = slot_from_shape( events.endEvents[i].shapeIdA );
+		int slotB = slot_from_shape( events.endEvents[i].shapeIdB );
 		if ( slotA < 0 || slotB < 0 )
 		{
 			continue;
@@ -450,14 +528,8 @@ static void export_sensor_events( b2WorldId worldId )
 
 	for ( int i = 0; i < events.endCount; ++i )
 	{
-		b2ShapeId sensorShape = events.endEvents[i].sensorShapeId;
-		b2ShapeId visitorShape = events.endEvents[i].visitorShapeId;
-		if ( !b2Shape_IsValid( sensorShape ) || !b2Shape_IsValid( visitorShape ) )
-		{
-			continue;
-		}
-		int sensorSlot = slot_from_shape( sensorShape );
-		int visitorSlot = slot_from_shape( visitorShape );
+		int sensorSlot = slot_from_shape( events.endEvents[i].sensorShapeId );
+		int visitorSlot = slot_from_shape( events.endEvents[i].visitorShapeId );
 		if ( sensorSlot < 0 || visitorSlot < 0 )
 		{
 			continue;
@@ -538,6 +610,10 @@ static void export_body_move_events( b2WorldId worldId )
 		b2BodyId bodyId = events.moveEvents[i].bodyId;
 		b2ExportBodyState( slot, events.moveEvents[i].transform, b2Body_GetLinearVelocity( bodyId ),
 						   b2Body_GetAngularVelocity( bodyId ) );
+		if ( events.moveEvents[i].fellAsleep )
+		{
+			b2ExportBodySleeping( slot, 1 );
+		}
 	}
 	g_body_move_count = count;
 }
@@ -765,6 +841,10 @@ static void export_all_joints( void )
 {
 	for ( int handle = 0; handle < g_joint_high_water; ++handle )
 	{
+		if ( !g_joints[handle].active )
+		{
+			continue;
+		}
 		export_joint_state( handle );
 	}
 }
@@ -1323,6 +1403,7 @@ void destroy_body( int slot )
 	b2DestroyBody( g_slots[slot].id );
 	g_slots[slot].active = 0;
 	g_slots[slot].id = b2_nullBodyId;
+	g_slots[slot].chainId = (b2ChainId){ 0 };
 	write_meta( slot, g_slots[slot].shapeType, 0.0f, 0.0f, b2_game_meta_disabled );
 	b2ExportBodySleeping( slot, 0 );
 	free_slot( slot );
@@ -1627,6 +1708,7 @@ void body_set_density( int slot, float density )
 	{
 		float value = density;
 		for_each_shape( bodyId, apply_density_cb, &value );
+		b2Body_UpdateMassFromShapes( bodyId );
 	}
 }
 
@@ -1638,6 +1720,7 @@ void body_add_shape_box( int slot, float hx, float hy, float offsetX, float offs
 	{
 		return;
 	}
+	destroy_slot_chain( slot );
 
 	b2Polygon box = b2MakeOffsetBox( hx, hy, (b2Vec2){ offsetX, offsetY }, b2Rot_identity );
 	b2ShapeDef shapeDef = b2DefaultShapeDef();
@@ -1660,6 +1743,7 @@ void body_set_shape_box( int slot, float hx, float hy, float offsetX, float offs
 	{
 		return;
 	}
+	destroy_slot_chain( slot );
 
 	b2Polygon box = b2MakeOffsetBox( hx, hy, (b2Vec2){ offsetX, offsetY }, b2Rot_identity );
 	b2ShapeId shapeId = first_shape( bodyId );
@@ -1687,6 +1771,7 @@ void body_add_shape_circle( int slot, float radius, float offsetX, float offsetY
 	{
 		return;
 	}
+	destroy_slot_chain( slot );
 
 	b2Circle circle = { { offsetX, offsetY }, radius };
 	b2ShapeDef shapeDef = b2DefaultShapeDef();
@@ -1709,6 +1794,7 @@ void body_set_shape_circle( int slot, float radius, float offsetX, float offsetY
 	{
 		return;
 	}
+	destroy_slot_chain( slot );
 
 	b2Circle circle = { { offsetX, offsetY }, radius };
 	b2ShapeId shapeId = first_shape( bodyId );
@@ -1737,6 +1823,7 @@ void body_add_shape_polygon( int slot, float* vertsXY, int vertCount, float offs
 	{
 		return;
 	}
+	destroy_slot_chain( slot );
 
 	b2Vec2 points[B2_MAX_POLYGON_VERTICES];
 	for ( int i = 0; i < vertCount; ++i )
@@ -1772,6 +1859,7 @@ void body_set_shape_polygon( int slot, float* vertsXY, int vertCount, float offs
 	{
 		return;
 	}
+	destroy_slot_chain( slot );
 
 	b2Vec2 points[B2_MAX_POLYGON_VERTICES];
 	for ( int i = 0; i < vertCount; ++i )
@@ -1804,6 +1892,72 @@ void body_set_shape_polygon( int slot, float* vertsXY, int vertCount, float offs
 }
 
 EMSCRIPTEN_KEEPALIVE
+void body_set_chain( int slot, float* xy, int count, int isLoop, float friction, float restitution,
+					 uint32_t categoryBits, uint32_t maskBits, int groupIndex )
+{
+	b2BodyId bodyId = slot_body( slot );
+	if ( !B2_IS_NON_NULL( bodyId ) || xy == NULL )
+	{
+		return;
+	}
+
+	if ( isLoop ? count < 3 : count < 4 )
+	{
+		return;
+	}
+
+	destroy_slot_chain( slot );
+	destroy_loose_shapes( slot );
+
+	b2Vec2* verts = (b2Vec2*)xy;
+	b2Vec2 ghost1 = { 0 };
+	b2Vec2 ghost2 = { 0 };
+	const b2Vec2* points = verts;
+	int pointCount = count;
+	if ( !isLoop )
+	{
+		ghost1 = verts[0];
+		ghost2 = verts[count - 1];
+		points = verts + 1;
+		pointCount = count - 2;
+	}
+
+	b2SurfaceMaterial material = b2DefaultSurfaceMaterial();
+	material.friction = friction >= 0.0f ? friction : 0.0f;
+	material.restitution = restitution;
+
+	b2ChainDef def = b2DefaultChainDef();
+	def.points = points;
+	def.pointCount = pointCount;
+	def.materials = &material;
+	def.materialCount = 1;
+	def.isLoop = isLoop != 0;
+	def.ghost1 = ghost1;
+	def.ghost2 = ghost2;
+	def.filter.categoryBits = normalize_category_bits( categoryBits );
+	def.filter.maskBits = normalize_mask_bits( maskBits );
+	def.filter.groupIndex = groupIndex;
+	def.enableSensorEvents = true;
+
+	b2ChainId chainId = b2CreateChain( bodyId, &def );
+	if ( !B2_IS_NON_NULL( chainId ) )
+	{
+		g_slots[slot].chainId = (b2ChainId){ 0 };
+		g_slots[slot].shapeType = (uint8_t)b2_game_shape_none;
+		int flags = g_slots[slot].bodyType == b2_game_static ? b2_game_meta_static : 0;
+		write_meta( slot, b2_game_shape_none, 0.0f, 0.0f, flags );
+		return;
+	}
+
+	for_each_shape( bodyId, enable_contact_events_cb, NULL );
+
+	g_slots[slot].chainId = chainId;
+	g_slots[slot].shapeType = (uint8_t)b2_game_shape_chain;
+	int flags = g_slots[slot].bodyType == b2_game_static ? b2_game_meta_static : 0;
+	write_meta( slot, b2_game_shape_chain, 0.0f, 0.0f, flags );
+}
+
+EMSCRIPTEN_KEEPALIVE
 void body_clear_shapes( int slot )
 {
 	b2BodyId bodyId = slot_body( slot );
@@ -1812,20 +1966,8 @@ void body_clear_shapes( int slot )
 		return;
 	}
 
-	for ( ;; )
-	{
-		b2ShapeId shapes[32];
-		int count = b2Body_GetShapes( bodyId, shapes, 32 );
-		if ( count <= 0 )
-		{
-			break;
-		}
-		int n = count < 32 ? count : 32;
-		for ( int i = 0; i < n; ++i )
-		{
-			b2DestroyShape( shapes[i], false );
-		}
-	}
+	destroy_slot_chain( slot );
+	destroy_loose_shapes( slot );
 
 	if ( g_slots[slot].bodyType == b2_game_dynamic )
 	{
