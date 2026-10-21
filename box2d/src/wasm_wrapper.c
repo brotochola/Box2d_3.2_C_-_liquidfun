@@ -28,11 +28,6 @@
 #define MAX_SENSOR_EVENTS 10000
 #define MAX_CONTACT_HIT_EVENTS 128
 #define MAX_JOINT_EVENTS 256
-/* Matches emcc -sPTHREAD_POOL_SIZE; create_world clamps workerCount to this.
- * CMake may override via -DWASM_PTHREAD_POOL_SIZE=N. */
-#ifndef WASM_PTHREAD_POOL_SIZE
-#define WASM_PTHREAD_POOL_SIZE 4
-#endif
 #define MAX_MOVER_PLANES 32
 #define MOVER_PLANE_FLOATS 8
 #define EVENT_HEADER_INTS 11
@@ -242,20 +237,35 @@ static void destroy_loose_shapes( int slot )
 		return;
 	}
 
-	int lastCount = -1;
+	/* 32 ids per read. A second full buffer is not "nothing left": GetShapes
+	 * returns the same 32 whenever 32 or more remain, so count==lastCount
+	 * stopped after the first batch once the body had 64 or more shapes.
+	 * Stop when the body's shape count does not fall (destroy no-op: locked
+	 * world, or a chain segment). ponytail: 128 passes × 32 = 4096 shapes;
+	 * a larger island needs a bigger stack buffer. */
 	for ( int iter = 0; iter < 128; ++iter )
 	{
-		b2ShapeId shapes[32];
-		int count = b2Body_GetShapes( bodyId, shapes, 32 );
-		if ( count <= 0 || count == lastCount )
+		int before = b2Body_GetShapeCount( bodyId );
+		if ( before <= 0 )
 		{
 			break;
 		}
-		lastCount = count;
-		int n = count < 32 ? count : 32;
-		for ( int i = 0; i < n; ++i )
+
+		b2ShapeId shapes[32];
+		int count = b2Body_GetShapes( bodyId, shapes, 32 );
+		if ( count <= 0 )
+		{
+			break;
+		}
+
+		for ( int i = 0; i < count; ++i )
 		{
 			b2DestroyShape( shapes[i], false );
+		}
+
+		if ( b2Body_GetShapeCount( bodyId ) >= before )
+		{
+			break;
 		}
 	}
 }
@@ -1041,10 +1051,7 @@ uint32_t create_world(
 	{
 		workerCount = 1;
 	}
-	if ( workerCount > WASM_PTHREAD_POOL_SIZE )
-	{
-		workerCount = WASM_PTHREAD_POOL_SIZE;
-	}
+	/* b2CreateWorld clamps to B2_MAX_WORKERS. */
 	worldDef.workerCount = workerCount;
 	b2WorldId worldId = b2CreateWorld( &worldDef );
 	lfBindBox2dWorld( worldId );
@@ -1315,7 +1322,7 @@ int create_body_polygon( uint32_t worldPacked, int type, float x, float y, float
 						 float offsetX, float offsetY, float density, float friction, float restitution, float linearDamp,
 						 float angularDamp, float gravityScale, float vx, float vy, float angularVel, int isSensor,
 						 int enableHitEvents, uint32_t categoryBits, uint32_t maskBits, int groupIndex, int fixedRotation,
-						 int entityIndex )
+						 int entityIndex, float radius )
 {
 	if ( g_capacity <= 0 || vertsXY == NULL || vertCount < 3 || vertCount > B2_MAX_POLYGON_VERTICES )
 	{
@@ -1357,7 +1364,7 @@ int create_body_polygon( uint32_t worldPacked, int type, float x, float y, float
 		return -1;
 	}
 
-	b2Polygon polygon = b2MakePolygon( &hull, 0.0f );
+	b2Polygon polygon = b2MakePolygon( &hull, radius > 0.0f ? radius : 0.0f );
 	b2ShapeDef shapeDef = b2DefaultShapeDef();
 	shapeDef.density = density;
 	shapeDef.material.friction = friction;
@@ -1815,7 +1822,7 @@ void body_set_shape_circle( int slot, float radius, float offsetX, float offsetY
 }
 
 EMSCRIPTEN_KEEPALIVE
-void body_add_shape_polygon( int slot, float* vertsXY, int vertCount, float offsetX, float offsetY )
+void body_add_shape_polygon( int slot, float* vertsXY, int vertCount, float offsetX, float offsetY, float radius )
 {
 	b2BodyId bodyId = slot_body( slot );
 	if ( !B2_IS_NON_NULL( bodyId ) || vertsXY == NULL || vertCount < 3 ||
@@ -1837,7 +1844,7 @@ void body_add_shape_polygon( int slot, float* vertsXY, int vertCount, float offs
 		return;
 	}
 
-	b2Polygon polygon = b2MakePolygon( &hull, 0.0f );
+	b2Polygon polygon = b2MakePolygon( &hull, radius > 0.0f ? radius : 0.0f );
 	b2ShapeDef shapeDef = b2DefaultShapeDef();
 	shapeDef.density = 1.0f;
 	shapeDef.enableSensorEvents = true;
@@ -1851,7 +1858,7 @@ void body_add_shape_polygon( int slot, float* vertsXY, int vertCount, float offs
 }
 
 EMSCRIPTEN_KEEPALIVE
-void body_set_shape_polygon( int slot, float* vertsXY, int vertCount, float offsetX, float offsetY )
+void body_set_shape_polygon( int slot, float* vertsXY, int vertCount, float offsetX, float offsetY, float radius )
 {
 	b2BodyId bodyId = slot_body( slot );
 	if ( !B2_IS_NON_NULL( bodyId ) || vertsXY == NULL || vertCount < 3 ||
@@ -1873,7 +1880,7 @@ void body_set_shape_polygon( int slot, float* vertsXY, int vertCount, float offs
 		return;
 	}
 
-	b2Polygon polygon = b2MakePolygon( &hull, 0.0f );
+	b2Polygon polygon = b2MakePolygon( &hull, radius > 0.0f ? radius : 0.0f );
 	b2ShapeId shapeId = first_shape( bodyId );
 	if ( B2_IS_NON_NULL( shapeId ) )
 	{
@@ -1881,7 +1888,7 @@ void body_set_shape_polygon( int slot, float* vertsXY, int vertCount, float offs
 	}
 	else
 	{
-		body_add_shape_polygon( slot, vertsXY, vertCount, offsetX, offsetY );
+		body_add_shape_polygon( slot, vertsXY, vertCount, offsetX, offsetY, radius );
 		return;
 	}
 

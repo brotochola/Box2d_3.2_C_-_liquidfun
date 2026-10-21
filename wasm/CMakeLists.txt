@@ -10,8 +10,9 @@ set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 # OFF = lab demo (physics_post.js). ON = WeedJS (weed_post.js → importScripts weedjsPost.js).
 option(BOX2D_WEED_INTEGRATION "Build post-js for WeedJS multithreadad-game-engine" OFF)
 
-# Box2D solver worker count ceiling; must match -sPTHREAD_POOL_SIZE and wasm_wrapper clamp.
-set(BOX2D_PTHREAD_POOL_SIZE "4" CACHE STRING "Emscripten pthread pool / Box2D workerCount max (e.g. 2 or 4)")
+# Emscripten prewarm only. Solver ceiling is B2_MAX_WORKERS (32), set at runtime.
+# Weed's build_for_weed.bat passes 0 so helpers spawn on pthread_create.
+set(BOX2D_PTHREAD_POOL_SIZE "4" CACHE STRING "Emscripten pthread prewarm (0 = spawn on demand; Weed uses 0)")
 # OFF | ON (-flto) | FULL (-flto=full). Default FULL = shipped Weed build.
 set(BOX2D_LTO_MODE "FULL" CACHE STRING "LTO mode: OFF, ON (-flto), FULL (-flto=full)")
 set_property(CACHE BOX2D_LTO_MODE PROPERTY STRINGS OFF ON FULL)
@@ -48,11 +49,14 @@ if(BOX2D_WEED_INTEGRATION)
 		"-sALLOW_MEMORY_GROWTH=0"
 		"-sINITIAL_MEMORY=512MB"
 	)
+	# Scene physics.numberOfPhysicsWorkers spawns helpers. A prewarmed pool stays parked.
+	set(BOX2D_EM_PTHREAD_POOL_SIZE 0)
 else()
 	set(WASM_MEM_FLAGS
 		"-sALLOW_MEMORY_GROWTH=0"
 		"-sINITIAL_MEMORY=128MB"
 	)
+	set(BOX2D_EM_PTHREAD_POOL_SIZE ${BOX2D_PTHREAD_POOL_SIZE})
 endif()
 
 set(WASM_LINK_FLAGS
@@ -61,7 +65,7 @@ set(WASM_LINK_FLAGS
 	"-pthread"
 	"-sSHARED_MEMORY=1"
 	${WASM_MEM_FLAGS}
-	"-sPTHREAD_POOL_SIZE=${BOX2D_PTHREAD_POOL_SIZE}"
+	"-sPTHREAD_POOL_SIZE=${BOX2D_EM_PTHREAD_POOL_SIZE}"
 	"-sENVIRONMENT=web,worker"
 	"-sEXPORTED_FUNCTIONS=['_malloc','_free','_weedjs_heap_bytes_used']"
 	"-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','HEAPF32','HEAP32']"
@@ -70,7 +74,6 @@ set(WASM_LINK_FLAGS
 
 target_compile_options(box2d PRIVATE -pthread -msimd128 -msse2 -ffast-math -fno-trapping-math)
 target_compile_options(box2d_wasm PRIVATE -pthread -msimd128 -msse2 -ffast-math -fno-trapping-math)
-target_compile_definitions(box2d_wasm PRIVATE WASM_PTHREAD_POOL_SIZE=${BOX2D_PTHREAD_POOL_SIZE})
 
 string(TOUPPER "${BOX2D_LTO_MODE}" _BOX2D_LTO_MODE_UPPER)
 if(_BOX2D_LTO_MODE_UPPER STREQUAL "FULL")
