@@ -368,14 +368,45 @@ typedef struct OverlapCollectCtx
 	int32_t* out;
 	int capacity;
 	int count;
+	uint32_t epoch;
 } OverlapCollectCtx;
+
+/* Per body slot: the overlap query that last listed it (Weed review N-22). A
+ * compound body has one shape per fixture and the tree reports each, so a
+ * three-shape body came back three times and filled the buffer with copies. */
+static uint32_t* g_overlap_stamp = NULL;
+static int g_overlap_stamp_cap = 0;
+static uint32_t g_overlap_epoch = 0;
+
+/* A fresh stamp for one query; 0 (no dedupe) if the stamp array cannot grow. */
+static uint32_t overlap_begin( void )
+{
+	if ( g_overlap_stamp_cap < g_capacity )
+	{
+		uint32_t* grown = (uint32_t*)calloc( (size_t)g_capacity, sizeof( uint32_t ) );
+		if ( grown == NULL )
+		{
+			return 0;
+		}
+		free( g_overlap_stamp );
+		g_overlap_stamp = grown;
+		g_overlap_stamp_cap = g_capacity;
+		g_overlap_epoch = 0;
+	}
+	if ( ++g_overlap_epoch == 0 )
+	{
+		memset( g_overlap_stamp, 0, (size_t)g_overlap_stamp_cap * sizeof( uint32_t ) );
+		g_overlap_epoch = 1;
+	}
+	return g_overlap_epoch;
+}
 
 static bool overlap_collect_callback( b2ShapeId shapeId, void* context )
 {
 	OverlapCollectCtx* ctx = (OverlapCollectCtx*)context;
 	if ( ctx == NULL || ctx->out == NULL || ctx->count >= ctx->capacity )
 	{
-		return true;
+		return false;
 	}
 
 	int slot = slot_from_shape( shapeId );
@@ -383,9 +414,18 @@ static bool overlap_collect_callback( b2ShapeId shapeId, void* context )
 	{
 		return true;
 	}
+	if ( ctx->epoch != 0 && slot < g_overlap_stamp_cap )
+	{
+		if ( g_overlap_stamp[slot] == ctx->epoch )
+		{
+			return true;
+		}
+		g_overlap_stamp[slot] = ctx->epoch;
+	}
 
 	ctx->out[ctx->count++] = slot;
-	return true;
+	/* Full: stop walking the tree. A count equal to capacity reads "that many or more". */
+	return ctx->count < ctx->capacity;
 }
 
 static float ray_collect_callback( b2ShapeId shapeId, b2Pos point, b2Vec2 normal, float fraction, void* context )
@@ -2002,7 +2042,7 @@ int overlap_aabb_into( uint32_t worldPacked, float x0, float y0, float x1, float
 
 	b2WorldId worldId = unpack_world_id( worldPacked );
 	int32_t* out = (int32_t*)(intptr_t)outByteOffset;
-	OverlapCollectCtx ctx = { out, outCapacity, 0 };
+	OverlapCollectCtx ctx = { out, outCapacity, 0, overlap_begin() };
 
 	b2AABB aabb = { { x0, y0 }, { x1, y1 } };
 	b2QueryFilter filter = make_query_filter( categoryBits, maskBits );
@@ -2033,7 +2073,7 @@ int overlap_circle( uint32_t worldPacked, float cx, float cy, float radius, uint
 		return 0;
 	}
 
-	OverlapCollectCtx ctx = { g_query_slots, MAX_QUERY_SLOTS, 0 };
+	OverlapCollectCtx ctx = { g_query_slots, MAX_QUERY_SLOTS, 0, overlap_begin() };
 	b2Vec2 center = { cx, cy };
 	b2ShapeProxy proxy = b2MakeProxy( &center, 1, radius );
 	b2QueryFilter filter = make_query_filter( categoryBits, maskBits );
@@ -2052,7 +2092,7 @@ int overlap_box( uint32_t worldPacked, float cx, float cy, float hx, float hy, f
 		return 0;
 	}
 
-	OverlapCollectCtx ctx = { g_query_slots, MAX_QUERY_SLOTS, 0 };
+	OverlapCollectCtx ctx = { g_query_slots, MAX_QUERY_SLOTS, 0, overlap_begin() };
 	b2Vec2 corners[4];
 	b2Polygon box = b2MakeBox( hx, hy );
 	b2Rot rot = b2MakeRot( angle );
