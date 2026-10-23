@@ -21,6 +21,10 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../box2d ${CMAKE_BINARY_DIR}/box2d)
 
 target_compile_options(box2d PRIVATE -pthread)
 target_link_options(box2d PRIVATE -pthread)
+if(BOX2D_WEED_INTEGRATION)
+	# Weed reads five profile times (wasm_wrapper.c g_profile); skip the per-stage solver timers.
+	target_compile_definitions(box2d PRIVATE B2_WEED_NO_STAGE_TIMERS)
+endif()
 
 add_executable(box2d_wasm
 	${CMAKE_CURRENT_SOURCE_DIR}/../box2d/src/wasm_wrapper.c

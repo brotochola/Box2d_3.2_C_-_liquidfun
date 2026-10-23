@@ -249,12 +249,21 @@ void b2JoinThread( b2Thread* t )
 
 #include <sched.h>
 #include <time.h>
+#if defined( __EMSCRIPTEN__ )
+#include <emscripten/emscripten.h>
+#endif
 
 uint64_t b2GetTicks( void )
 {
+#if defined( __EMSCRIPTEN__ )
+	// One import call returning milliseconds. clock_gettime goes through WASI's clock_time_get,
+	// which builds a BigInt on every call.
+	return (uint64_t)( emscripten_get_now() * 1000000.0 );
+#else
 	struct timespec ts;
 	clock_gettime( CLOCK_MONOTONIC, &ts );
 	return ts.tv_sec * 1000000000LL + ts.tv_nsec;
+#endif
 }
 
 float b2GetMilliseconds( uint64_t ticks )
@@ -265,10 +274,18 @@ float b2GetMilliseconds( uint64_t ticks )
 
 float b2GetMillisecondsAndReset( uint64_t* ticks )
 {
+#if defined( B2_WEED_NO_STAGE_TIMERS )
+	// The Weed build reads only the step, collide, solve, sleep-island and sensor times
+	// (wasm_wrapper.c's g_profile). This serves the solver's per-stage timers: a clock call per
+	// stage per worker per substep, each an import call under Emscripten.
+	(void)ticks;
+	return 0.0f;
+#else
 	uint64_t ticksNow = b2GetTicks();
 	float ms = (float)( ( ticksNow - *ticks ) / 1000000.0 );
 	*ticks = ticksNow;
 	return ms;
+#endif
 }
 
 void b2Yield( void )

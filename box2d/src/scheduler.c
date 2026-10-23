@@ -71,13 +71,21 @@ static bool b2SchedulerHasPending( b2Scheduler* scheduler )
 static bool b2SchedulerSpin( b2Scheduler* scheduler )
 {
 	uint64_t ticks = b2GetTicks();
-	while ( true )
+	for ( unsigned spin = 1;; ++spin )
 	{
 		if ( b2SchedulerHasPending( scheduler ) || b2AtomicLoadInt( &scheduler->shutdown ) != 0 )
 		{
 			return true;
 		}
 
+#if defined( __EMSCRIPTEN__ )
+		// Under Emscripten the clock is an import call and b2Pause is empty, so reading it every
+		// spin made the wait mostly clock calls. Every 64th spin still ends it near the deadline.
+		if ( ( spin & 63u ) != 0 )
+		{
+			continue;
+		}
+#endif
 		if ( b2GetMilliseconds( ticks ) >= B2_SCHEDULER_SPIN_MILLISECONDS )
 		{
 			return false;
