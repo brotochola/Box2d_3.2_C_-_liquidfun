@@ -203,7 +203,7 @@ The web demo provides an interactive laboratory to test Box2D 3.2 and LiquidFun 
 | Optimization | Implementation Details | Benchmark Impact |
 | :--- | :--- | :--- |
 | **Batched Path2D Rendering** | Grouped particles by material flag into single batched paths (`ctx.fill()` per color palette). | Canvas 2D fill calls reduced from 4,000+ to **6 per frame** (~20ms $\rightarrow$ **< 0.8ms** render time). |
-| **Zero-Copy SharedArrayBuffer** | Non-growing fixed WASM heap (`ALLOW_MEMORY_GROWTH=0`) mapped directly to worker TypedArrays. | Completely eliminated `postMessage` structural cloning latency (0ms transfer overhead). |
+| **Zero-Copy SharedArrayBuffer** | Fixed-size WASM heap that never grows, mapped directly to worker TypedArrays. The lab build links 128 MB; the WeedJS build imports its memory and sizes it per scene (16 MB to 2 GB) with `weedjs/weed_pre.js`. | Completely eliminated `postMessage` structural cloning latency (0ms transfer overhead). |
 | **WASM SIMD128 Vectorization** | Compiled with `-msimd128 -msse2 -ffast-math -fno-trapping-math -flto=full`. | LLVM SIMD auto-vectorization across particle position and velocity integration arrays. |
 | **Contact Buffer Pre-allocation** | Pre-allocated `particleContactCapacity = 8 * maxParticles` at system creation. | Eliminated runtime `realloc()` memory locks during sudden fluid compression spikes. |
 | **Spatial Grid Reuse** | Retained spatial hash cell tables across intermediate sub-steps. | Reduced spatial hash rebuild overhead by **50%** per frame with zero collision accuracy regression. |
@@ -386,7 +386,7 @@ const hit = world.castRayClosest({
 When `growable = false`, all particle and rigid body state is pre-allocated inside fixed WASM heap regions:
 
 ```
-WASM Heap SharedArrayBuffer (128 MB / 256 MB)
+WASM Heap SharedArrayBuffer (lab: 128 MB; WeedJS: physics.wasmMemoryMB, default 128 MB)
 ├── [0x00000000] Static Engine Data & Stack
 ├── [g_state_buffer] Rigid Body Channels (8 floats/body: x, y, rot, vx, vy, angVel, rotC, rotS)
 ├── [g_meta_buffer]  Rigid Body Shape Metadata (4 floats/body: shapeType, halfW, halfH, flags)
