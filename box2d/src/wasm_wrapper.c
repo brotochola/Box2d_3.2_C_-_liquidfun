@@ -3685,10 +3685,20 @@ int extract_particles( int groupId, int count, uint32_t groupFlags, int trackGro
 
 /* dlmalloc occupancy — for Weed MemoryPanel (used vs INITIAL_MEMORY reserved). */
 #include <malloc.h>
+#include <unistd.h>
 
 EMSCRIPTEN_KEEPALIVE
 size_t weedjs_heap_bytes_used( void )
 {
 	struct mallinfo info = mallinfo();
 	return (size_t)info.uordblks;
+}
+
+/* Static data, stacks and the highest heap address reached. Emscripten's dlmalloc never
+   trims (MORECORE_CANNOT_TRIM), so the break only rises: this is the peak footprint.
+   O(1) and lock-free, so it is safe inside an abort handler (mallinfo is not). */
+EMSCRIPTEN_KEEPALIVE
+size_t weedjs_memory_peak_bytes( void )
+{
+	return (size_t)sbrk( 0 );
 }
