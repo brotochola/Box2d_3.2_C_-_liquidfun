@@ -42,16 +42,24 @@ else()
 	set(BOX2D_POST_JS "${CMAKE_CURRENT_SOURCE_DIR}/../demo/physics_post.js")
 endif()
 
-# Weed: fixed 256MB — no growth. HEAP SAB is captured once at WEEDJS_READY and
-# hot-rebound into Transform/RigidBody; growth would detach that buffer.
-# BallsScene (~9k bodies) high-water ≈ 45MB; 256MB leaves ~5× headroom for
-# Predator-scale. Full MAX_ENTITIES (65k) may need more — measure MemoryPanel
-# HEAP high-water before raising entity caps that far.
+# Weed: the scene chooses the size (physics.wasmMemoryMB, 16 MB..2 GB) and it never grows.
+# weedjs/weed_pre.js creates the memory from the physics worker's name ('physics pages=N')
+# with initial == maximum: the HEAP SAB is captured once at WEEDJS_READY and bound into every
+# Weed worker, and growth would put new allocations in pages those views do not cover.
+# ALLOW_MEMORY_GROWTH is on only so the module's import accepts that range (without it emcc
+# pins the import to INITIAL_MEMORY); IMPORTED_MEMORY makes the glue take Module.wasmMemory;
+# ABORTING_MALLOC turns the failed grow into abort("OOM") instead of a NULL that Box2D and
+# LiquidFun do not check. Above 2 GB the glue switches to unsigned pointers, which Weed's
+# `>> 2` pointer math does not expect.
 # Lab stays lean at 128MB fixed.
 if(BOX2D_WEED_INTEGRATION)
 	set(WASM_MEM_FLAGS
-		"-sALLOW_MEMORY_GROWTH=0"
-		"-sINITIAL_MEMORY=512MB"
+		"-sIMPORTED_MEMORY=1"
+		"-sALLOW_MEMORY_GROWTH=1"
+		"-sINITIAL_MEMORY=16MB"
+		"-sMAXIMUM_MEMORY=2GB"
+		"-sABORTING_MALLOC=1"
+		"-Wno-pthreads-mem-growth"
 	)
 	# Scene physics.numberOfPhysicsWorkers spawns helpers. A prewarmed pool stays parked.
 	set(BOX2D_EM_PTHREAD_POOL_SIZE 0)
@@ -75,6 +83,12 @@ set(WASM_LINK_FLAGS
 	"-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','HEAPF32','HEAP32']"
 	"--post-js=${BOX2D_POST_JS}"
 )
+set(BOX2D_LINK_DEPENDS "${BOX2D_POST_JS}")
+if(BOX2D_WEED_INTEGRATION)
+	set(BOX2D_PRE_JS "${CMAKE_CURRENT_SOURCE_DIR}/../weedjs/weed_pre.js")
+	list(APPEND WASM_LINK_FLAGS "--pre-js=${BOX2D_PRE_JS}")
+	list(APPEND BOX2D_LINK_DEPENDS "${BOX2D_PRE_JS}")
+endif()
 
 target_compile_options(box2d PRIVATE -pthread -msimd128 -msse2 -ffast-math -fno-trapping-math)
 target_compile_options(box2d_wasm PRIVATE -pthread -msimd128 -msse2 -ffast-math -fno-trapping-math)
@@ -115,4 +129,6 @@ set_target_properties(box2d_wasm PROPERTIES
 	OUTPUT_NAME "${BOX2D_WASM_OUTPUT_NAME}"
 	SUFFIX ".js"
 	RUNTIME_OUTPUT_DIRECTORY "${BOX2D_WASM_OUT_DIR}"
+	# Relink when the pre/post-js change (emcc embeds them in the glue).
+	LINK_DEPENDS "${BOX2D_LINK_DEPENDS}"
 )
