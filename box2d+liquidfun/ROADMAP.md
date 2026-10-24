@@ -141,8 +141,11 @@ partículas, antes/después reales, no supuestos) — log completo en
   inventado) en `Integrate`, `SolveGravity`, `LimitVelocity`. El build ya
   compilaba con `-msimd128 -msse2` (auto-vectorización del compilador
   solamente); ahora hay intrínsecos explícitos, y un `#error` en tiempo de
-  compilación si esa flag llegara a faltar — un solo camino de código, sin
-  fallback escalar duplicado (una sola tool-chain, un solo target).
+  compilación si esa flag llegara a faltar. Hay un solo camino de código: los
+  intrínsecos se escriben una vez. Desde el 2026-10-24 hay además un build sin
+  SIMD (`BOX2D_WASM_NO_SIMD`), que toma esas mismas llamadas de
+  `src/lf_sse2_scalar.h`, en C plano. Todo intrínseco nuevo necesita su versión
+  ahí y un caso en `tests/sse2_scalar` (ver `NO_SIMD_BUILD.md` en la raíz).
 - **Cacheo de celda de grid por partícula** (`cellX`/`cellY`, llenado una vez
   en `BuildGrid`) — evita recomputar `floorf`+multiplicación en cada lookup
   de `FindParticleContacts`, `ForEachParticleNearShape`, `SolveBarrier`.

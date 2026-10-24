@@ -259,6 +259,21 @@ chmod +x build_wasm.sh
 
 The build will generate `demo/box2d_wasm.js` and `demo/box2d_wasm.wasm`.
 
+#### SIMD and no-SIMD builds:
+The module builds two ways from the same sources:
+
+- **With wasm SIMD**: the default, the faster build, and the one WeedJS ships.
+- **Without SIMD**: `-DBOX2D_WASM_NO_SIMD=ON`. This is for JavaScript engines that have no wasm SIMD,
+  such as Firefox/GeckoView on 32-bit ARM, which cannot even compile a module that holds one SIMD
+  instruction.
+
+For WeedJS, `weedjs\build_for_weed.bat` builds both. It writes the no-SIMD module to `weedjs/nosimd/`,
+and copies the SIMD module into WeedJS only when both builds passed their checks.
+`build_for_weed.bat nosimd` builds only the no-SIMD module.
+
+**Every change must keep both builds working.** [NO_SIMD_BUILD.md](NO_SIMD_BUILD.md) has the rules,
+the switch and the checks.
+
 ---
 
 ### 3. Building & Running Native C Demos
@@ -421,7 +436,9 @@ Box2d_3.2_C_-_liquidfun/
 │   ├── include/liquidfun/
 │   │   └── lf_particle_system.h       # LiquidFun C Public API
 │   ├── src/
-│   │   └── lf_particle_system.c       # SPH solvers, spatial hash, springs, groups
+│   │   ├── lf_particle_system.c       # SPH solvers, spatial hash, springs, groups
+│   │   └── lf_sse2_scalar.h           # Plain C SSE2 intrinsics for the no-SIMD build
+│   ├── tests/sse2_scalar/             # Checks lf_sse2_scalar.h against SSE2 on wasm SIMD
 │   └── examples/                      # Standalone native C demos
 │       ├── demo_water.c               # Native fluid drop demo
 │       ├── demo_elastic.c             # Native shape-matching jelly demo
@@ -442,6 +459,7 @@ Box2d_3.2_C_-_liquidfun/
 ├── build_wasm.bat                     # Windows automated build script
 ├── build_wasm.sh                      # Linux/macOS automated build script
 ├── LIQUIDFUN_SUMMARY.md               # Mathematical & technical solver breakdown
+├── NO_SIMD_BUILD.md                   # SIMD and no-SIMD builds: the rules for every change
 └── README.md                          # Repository documentation
 ```
 
@@ -458,7 +476,7 @@ git subtree pull --prefix=box2d upstream <sha> --squash
 git apply --3way patches/weed-state-export.patch
 ```
 
-Then fix `lfBindBox2dWorld` if `b2World` task fields moved, and run `weedjs\build_for_weed.bat`.
+Then fix `lfBindBox2dWorld` if `b2World` task fields moved, and run `weedjs\build_for_weed.bat`. It builds both the SIMD and the no-SIMD module, so upstream's scalar path (`B2_SIMD_NONE`) gets built too.
 
 ## License & Acknowledgments
 
