@@ -17,6 +17,28 @@ set(BOX2D_PTHREAD_POOL_SIZE "4" CACHE STRING "Emscripten pthread prewarm (0 = sp
 set(BOX2D_LTO_MODE "FULL" CACHE STRING "LTO mode: OFF, ON (-flto), FULL (-flto=full)")
 set_property(CACHE BOX2D_LTO_MODE PROPERTY STRINGS OFF ON FULL)
 
+# SIMD or no SIMD: the same sources build two ways (NO_SIMD_BUILD.md).
+#   BOX2D_WASM_NO_SIMD=OFF (default): wasm SIMD (-msimd128 -msse2). The faster build, the one WeedJS ships.
+#   BOX2D_WASM_NO_SIMD=ON: not a single SIMD instruction, for engines without wasm SIMD
+#     (Firefox/GeckoView on 32-bit ARM cannot even compile a module that holds one).
+# Everything that differs between the two is set in this block. In C, the no-SIMD build defines
+# BOX2D_DISABLE_SIMD in every target: Box2D's core.h then selects its scalar path, liquidfun-c takes
+# lf_sse2_scalar.h instead of <emmintrin.h>, and wasm_wrapper.c skips its SSE2 loop. Every change to
+# the C code must keep both builds working: weedjs/build_for_weed.bat builds both each time.
+option(BOX2D_WASM_NO_SIMD "Build without wasm SIMD, for engines that have none (slower; OFF = SIMD)" OFF)
+if(BOX2D_WASM_NO_SIMD)
+	message(STATUS "Box2D WASM: no SIMD (scalar build)")
+	set(BOX2D_WASM_SIMD_FLAGS "")
+	set(BOX2D_WASM_SIMD_DEFINITIONS BOX2D_DISABLE_SIMD)
+	set(BOX2D_WASM_WEED_OUT_DIR "${CMAKE_SOURCE_DIR}/../weedjs/nosimd")
+else()
+	set(BOX2D_WASM_SIMD_FLAGS -msimd128 -msse2)
+	set(BOX2D_WASM_SIMD_DEFINITIONS "")
+	set(BOX2D_WASM_WEED_OUT_DIR "${CMAKE_SOURCE_DIR}/../weedjs")
+endif()
+# Box2D's own option follows ours both ways, so a reused build dir never keeps a stale value.
+set(BOX2D_DISABLE_SIMD ${BOX2D_WASM_NO_SIMD} CACHE BOOL "Disable SIMD math (slower)" FORCE)
+
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../box2d ${CMAKE_BINARY_DIR}/box2d)
 
 target_compile_options(box2d PRIVATE -pthread)
@@ -90,8 +112,11 @@ if(BOX2D_WEED_INTEGRATION)
 	list(APPEND BOX2D_LINK_DEPENDS "${BOX2D_PRE_JS}")
 endif()
 
-target_compile_options(box2d PRIVATE -pthread -msimd128 -msse2 -ffast-math -fno-trapping-math)
-target_compile_options(box2d_wasm PRIVATE -pthread -msimd128 -msse2 -ffast-math -fno-trapping-math)
+target_compile_options(box2d PRIVATE -pthread ${BOX2D_WASM_SIMD_FLAGS} -ffast-math -fno-trapping-math)
+target_compile_options(box2d_wasm PRIVATE -pthread ${BOX2D_WASM_SIMD_FLAGS} -ffast-math -fno-trapping-math)
+# Box2D's own CMake already gives the box2d library BOX2D_DISABLE_SIMD; this hands the same switch
+# to the wrapper and liquidfun-c.
+target_compile_definitions(box2d_wasm PRIVATE ${BOX2D_WASM_SIMD_DEFINITIONS})
 
 string(TOUPPER "${BOX2D_LTO_MODE}" _BOX2D_LTO_MODE_UPPER)
 if(_BOX2D_LTO_MODE_UPPER STREQUAL "FULL")
@@ -112,9 +137,10 @@ endif()
 
 target_link_options(box2d_wasm PRIVATE ${WASM_LINK_FLAGS})
 
-# Lab demo → demo/. Weed build → weedjs/ (gitignored; build_for_weed.bat copies from there).
+# Lab demo → demo/. Weed build → weedjs/ (gitignored; build_for_weed.bat copies from there), or
+# weedjs/nosimd/ for the no-SIMD build, so it never replaces the SIMD module WeedJS ships.
 if(BOX2D_WEED_INTEGRATION)
-	set(BOX2D_WASM_OUT_DIR "${CMAKE_SOURCE_DIR}/../weedjs")
+	set(BOX2D_WASM_OUT_DIR "${BOX2D_WASM_WEED_OUT_DIR}")
 else()
 	set(BOX2D_WASM_OUT_DIR "${CMAKE_SOURCE_DIR}/../demo")
 endif()

@@ -19,10 +19,20 @@
 #include <stdlib.h>
 #include <string.h>
 
-// SSE2 is required (Emscripten -msimd128 -msse2, see wasm/CMakeLists.txt,
-// translated to real wasm128 instructions - same technique Box2D 3's own
-// contact_solver.c uses for B2_SIMD_SSE2 on B2_CPU_WASM). Fail the build
-// loudly instead of silently going scalar if that flag is ever missing.
+// SIMD or no SIMD (NO_SIMD_BUILD.md). The SSE2 intrinsics in this file are
+// written once, for both builds:
+// - SIMD build (the default, the one WeedJS ships): Emscripten -msimd128
+//   -msse2 (wasm/CMakeLists.txt) turns them into real wasm SIMD instructions,
+//   the same technique Box2D 3's own contact_solver.c uses for B2_SIMD_SSE2 on
+//   B2_CPU_WASM.
+// - No-SIMD build (BOX2D_WASM_NO_SIMD, which defines BOX2D_DISABLE_SIMD): they
+//   come from lf_sse2_scalar.h, plain C with the same results.
+// An intrinsic added here needs its plain C version in lf_sse2_scalar.h and a
+// case in tests/sse2_scalar. Without SSE2 and without BOX2D_DISABLE_SIMD the
+// build stops, rather than going scalar by accident when a flag goes missing.
+#if defined( BOX2D_DISABLE_SIMD )
+#include "lf_sse2_scalar.h"
+#else
 #if defined( _MSC_VER ) && !defined( __clang__ )
 #include <intrin.h>
 #if !defined( __SSE2__ )
@@ -30,9 +40,10 @@
 #endif
 #endif
 #if !defined( __SSE2__ )
-#error "liquidfun-c requires SSE2 (-msimd128 -msse2). Check wasm/CMakeLists.txt compile flags."
+#error "liquidfun-c needs SSE2 (-msimd128 -msse2), or BOX2D_DISABLE_SIMD for the no-SIMD build. Check wasm/CMakeLists.txt compile flags."
 #endif
 #include <emmintrin.h>
+#endif
 
 // Google LiquidFun 1.1.0 constants (b2_particleStride, b2_minParticleWeight, …).
 #define LF_PARTICLE_STRIDE 0.75f

@@ -11,7 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined( __SSE2__ )
+// SIMD or no SIMD (NO_SIMD_BUILD.md): LF_WASM_SSE2 code has a plain loop after it that does the
+// same work, which is all the no-SIMD build (BOX2D_DISABLE_SIMD, no -msse2) runs.
+#if defined( __SSE2__ ) && !defined( BOX2D_DISABLE_SIMD )
 #include <emmintrin.h>
 #define LF_WASM_SSE2 1
 #endif
