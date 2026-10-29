@@ -1646,6 +1646,43 @@ void body_apply_torque( int slot, float torque, int wake )
 	b2Body_ApplyTorque( bodyId, torque, wake != 0 );
 }
 
+/* WeedJS (W28): applyForcesAndTorque's loop in one call. For each slot of the list, the RigidBody columns in this
+   memory: a static body's accelerations are cleared; any other gets ax, ay times its mass (1 when not positive) as a
+   force at its centre, and angularAccel times its inertia (its mass when not positive) as a torque unless its rotation
+   is fixed, both waking it, as body_apply_force_center and body_apply_torque would from JS (the products in float,
+   which JS rounds to float at the call). inertia and fixedRotation may be 0 (absent). */
+EMSCRIPTEN_KEEPALIVE
+void bodies_apply_accelerations( const uint16_t* list, int count, float* ax, float* ay, float* angularAccel,
+								 const float* mass, const float* inertia, const uint8_t* isStatic,
+								 const uint8_t* fixedRotation )
+{
+	for ( int n = 0; n < count; ++n )
+	{
+		int i = list[n];
+		if ( isStatic[i] )
+		{
+			ax[i] = 0.0f;
+			ay[i] = 0.0f;
+			angularAccel[i] = 0.0f;
+			continue;
+		}
+		float m = mass[i];
+		float bodyMass = m > 0.0f ? m : 1.0f;
+		float fx = ax[i];
+		float fy = ay[i];
+		if ( fx != 0.0f || fy != 0.0f )
+		{
+			body_apply_force_center( i, fx * bodyMass, fy * bodyMass, 1 );
+		}
+		float aa = angularAccel[i];
+		if ( aa != 0.0f && !( fixedRotation != NULL && fixedRotation[i] ) )
+		{
+			float in = inertia != NULL ? inertia[i] : 0.0f;
+			body_apply_torque( i, aa * ( in > 0.0f ? in : bodyMass ), 1 );
+		}
+	}
+}
+
 EMSCRIPTEN_KEEPALIVE
 void body_set_awake( int slot, int awake )
 {
