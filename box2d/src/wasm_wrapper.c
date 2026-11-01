@@ -152,6 +152,14 @@ static uint64_t normalize_mask_bits( uint32_t maskBits )
 	return maskBits == 0 ? B2_DEFAULT_MASK_BITS : (uint64_t)maskBits;
 }
 
+/* A body's mask as WeedJS gives it: 0 collides with nothing, as in Box2D (N-97: it used to read as the default
+   mask, every layer). Collider.collisionMask starts at 0xFFFFFFFF, so a 0 is a game's choice. Queries keep
+   normalize_mask_bits, where 0 asks for the default. */
+static uint64_t body_mask_bits( uint32_t maskBits )
+{
+	return (uint64_t)maskBits;
+}
+
 static uint64_t normalize_category_bits( uint32_t categoryBits )
 {
 	return categoryBits == 0 ? (uint64_t)B2_DEFAULT_CATEGORY_BITS : (uint64_t)categoryBits;
@@ -1030,7 +1038,7 @@ static int create_body_internal( uint32_t worldPacked, int type, float x, float 
 	shapeDef.material.friction = friction;
 	shapeDef.material.restitution = restitution;
 	shapeDef.filter.categoryBits = normalize_category_bits( categoryBits );
-	shapeDef.filter.maskBits = normalize_mask_bits( maskBits );
+	shapeDef.filter.maskBits = body_mask_bits( maskBits );
 	shapeDef.filter.groupIndex = groupIndex;
   shapeDef.isSensor = isSensor != 0;
   /* Visitors need sensor events too or Box2D omits sensor begin/end. */
@@ -1412,7 +1420,7 @@ int create_body_polygon( uint32_t worldPacked, int type, float x, float y, float
 	shapeDef.material.friction = friction;
 	shapeDef.material.restitution = restitution;
 	shapeDef.filter.categoryBits = normalize_category_bits( categoryBits );
-	shapeDef.filter.maskBits = normalize_mask_bits( maskBits );
+	shapeDef.filter.maskBits = body_mask_bits( maskBits );
 	shapeDef.filter.groupIndex = groupIndex;
   shapeDef.isSensor = isSensor != 0;
   shapeDef.enableSensorEvents = true;
@@ -1706,7 +1714,7 @@ void body_set_filter( int slot, uint32_t categoryBits, uint32_t maskBits, int gr
 
 	b2Filter filter = { 0 };
 	filter.categoryBits = normalize_category_bits( categoryBits );
-	filter.maskBits = normalize_mask_bits( maskBits );
+	filter.maskBits = body_mask_bits( maskBits );
 	filter.groupIndex = groupIndex;
 	for_each_shape( bodyId, apply_filter_cb, &filter );
 }
@@ -2021,7 +2029,7 @@ void body_set_chain( int slot, float* xy, int count, int isLoop, float friction,
 	def.ghost1 = ghost1;
 	def.ghost2 = ghost2;
 	def.filter.categoryBits = normalize_category_bits( categoryBits );
-	def.filter.maskBits = normalize_mask_bits( maskBits );
+	def.filter.maskBits = body_mask_bits( maskBits );
 	def.filter.groupIndex = groupIndex;
 	def.enableSensorEvents = true;
 
