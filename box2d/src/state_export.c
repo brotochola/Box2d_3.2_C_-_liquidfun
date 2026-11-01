@@ -102,6 +102,17 @@ void b2ExportBodyVelocity( int entityIndex, b2Vec2 linearVelocity, float angular
 	g_channels[b2_weed_angular_velocity][entityIndex] = angularVelocity;
 }
 
+int b2BodyPoseDiffers( int entityIndex, b2WorldTransform transform )
+{
+	if ( g_channels[b2_weed_x] == NULL || g_channels[b2_weed_rot_c] == NULL || g_channels[b2_weed_rot_s] == NULL ||
+		 entityIndex < 0 || entityIndex >= g_capacity )
+	{
+		return 1;
+	}
+	return g_channels[b2_weed_x][entityIndex] != (float)transform.p.x || g_channels[b2_weed_y][entityIndex] != (float)transform.p.y ||
+		   g_channels[b2_weed_rot_c][entityIndex] != transform.q.c || g_channels[b2_weed_rot_s][entityIndex] != transform.q.s;
+}
+
 int b2BodyStateWasStill( int entityIndex )
 {
 	if ( g_still == NULL || entityIndex < 0 || entityIndex >= g_still_capacity )

@@ -680,9 +680,19 @@ static void export_body_move_events( b2WorldId worldId )
 		g_body_fell_asleep[count] = events.moveEvents[i].fellAsleep ? 1 : 0;
 		count++;
 
+		/* E-182: the solver's finalize exported this state already. The velocities are read again (LiquidFun's
+		   coupling changes them after the finalize); the pose only when it moved after it (continuous collision's
+		   time of impact) or the body fell asleep. */
 		b2BodyId bodyId = events.moveEvents[i].bodyId;
-		b2ExportBodyState( slot, events.moveEvents[i].transform, b2Body_GetLinearVelocity( bodyId ),
-						   b2Body_GetAngularVelocity( bodyId ) );
+		if ( events.moveEvents[i].fellAsleep || b2BodyPoseDiffers( slot, events.moveEvents[i].transform ) )
+		{
+			b2ExportBodyState( slot, events.moveEvents[i].transform, b2Body_GetLinearVelocity( bodyId ),
+							   b2Body_GetAngularVelocity( bodyId ) );
+		}
+		else
+		{
+			b2ExportBodyVelocity( slot, b2Body_GetLinearVelocity( bodyId ), b2Body_GetAngularVelocity( bodyId ) );
+		}
 		if ( events.moveEvents[i].fellAsleep )
 		{
 			b2ExportBodySleeping( slot, 1 );
