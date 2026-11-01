@@ -3,9 +3,15 @@
 
 #include "state_export.h"
 
+#include <stdlib.h>
+#include <string.h>
+
 static float* g_channels[B2_STATE_EXPORT_CHANNELS];
 static uint8_t* g_sleeping = NULL;
 static int g_capacity;
+/* E-181: per slot, 1 when the last finalize export found the pose unchanged. */
+static uint8_t* g_still = NULL;
+static int g_still_capacity = 0;
 
 int b2GetStateExportCapacity( void )
 {
@@ -25,6 +31,16 @@ void b2BindWeedExport( float* x, float* y, float* rotation, float* vx, float* vy
 	g_channels[b2_weed_rot_c] = rotC;
 	g_channels[b2_weed_rot_s] = rotS;
 	g_sleeping = sleeping;
+	if ( entityCapacity > g_still_capacity )
+	{
+		free( g_still );
+		g_still = (uint8_t*)calloc( (size_t)entityCapacity, 1 );
+		g_still_capacity = g_still != NULL ? entityCapacity : 0;
+	}
+	else if ( g_still != NULL )
+	{
+		memset( g_still, 0, (size_t)g_still_capacity );
+	}
 	if ( entityCapacity <= 0 )
 	{
 		for ( int i = 0; i < B2_STATE_EXPORT_CHANNELS; ++i )
@@ -47,6 +63,41 @@ void b2BindStateExportBuffer( float* buffer, int bodyCount )
 	b2BindWeedExport( buffer + 0 * bodyCount, buffer + 1 * bodyCount, buffer + 2 * bodyCount, buffer + 3 * bodyCount,
 					  buffer + 4 * bodyCount, buffer + 5 * bodyCount, buffer + 6 * bodyCount, buffer + 7 * bodyCount, NULL,
 					  bodyCount );
+}
+
+void b2ExportBodyStateIfMoved( int entityIndex, b2WorldTransform transform, b2Vec2 linearVelocity, float angularVelocity )
+{
+	if ( g_channels[b2_weed_x] == NULL || g_channels[b2_weed_rot_c] == NULL || g_channels[b2_weed_rot_s] == NULL ||
+		 g_still == NULL || entityIndex < 0 || entityIndex >= g_capacity || entityIndex >= g_still_capacity )
+	{
+		b2ExportBodyState( entityIndex, transform, linearVelocity, angularVelocity );
+		return;
+	}
+
+	/* The channels hold what the last export wrote (WeedJS reads them as Transform.x, y, rotC and rotS), and Box2D
+	   finalizes every awake body every step, moved or not. */
+	if ( g_channels[b2_weed_x][entityIndex] == (float)transform.p.x && g_channels[b2_weed_y][entityIndex] == (float)transform.p.y &&
+		 g_channels[b2_weed_rot_c][entityIndex] == transform.q.c && g_channels[b2_weed_rot_s][entityIndex] == transform.q.s )
+	{
+		g_channels[b2_weed_vx][entityIndex] = linearVelocity.x;
+		g_channels[b2_weed_vy][entityIndex] = linearVelocity.y;
+		g_channels[b2_weed_angular_velocity][entityIndex] = angularVelocity;
+		b2ExportBodySleeping( entityIndex, 0 );
+		g_still[entityIndex] = 1;
+		return;
+	}
+
+	g_still[entityIndex] = 0;
+	b2ExportBodyState( entityIndex, transform, linearVelocity, angularVelocity );
+}
+
+int b2BodyStateWasStill( int entityIndex )
+{
+	if ( g_still == NULL || entityIndex < 0 || entityIndex >= g_still_capacity )
+	{
+		return 0;
+	}
+	return g_still[entityIndex];
 }
 
 void b2ExportBodySleeping( int entityIndex, int sleeping )

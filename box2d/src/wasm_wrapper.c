@@ -663,6 +663,13 @@ static void export_body_move_events( b2WorldId worldId )
 			continue;
 		}
 
+		/* E-181: Box2D writes a move event for every awake body, moved or not. One whose pose the finalize export
+		   found unchanged is left out of the list WeedJS rewrites the spatial grid from, unless it fell asleep. */
+		if ( !events.moveEvents[i].fellAsleep && b2BodyStateWasStill( slot ) )
+		{
+			continue;
+		}
+
 		g_body_moved[count] = slot;
 		g_body_fell_asleep[count] = events.moveEvents[i].fellAsleep ? 1 : 0;
 		count++;

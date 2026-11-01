@@ -27,4 +27,9 @@ void b2BindWeedExport( float* x, float* y, float* rotation, float* vx, float* vy
 					   float* rotC, float* rotS, uint8_t* sleeping, int entityCapacity );
 int b2GetStateExportCapacity( void );
 void b2ExportBodyState( int entityIndex, b2WorldTransform transform, b2Vec2 linearVelocity, float angularVelocity );
+/* WeedJS E-181: b2ExportBodyState from the solver's finalize, except that a pose equal to the one the channels hold
+   writes the velocities only and notes the body still (b2BodyStateWasStill) until its next export. */
+void b2ExportBodyStateIfMoved( int entityIndex, b2WorldTransform transform, b2Vec2 linearVelocity, float angularVelocity );
+/* 1 when the body's last finalize export found its pose unchanged. */
+int b2BodyStateWasStill( int entityIndex );
 void b2ExportBodySleeping( int entityIndex, int sleeping );

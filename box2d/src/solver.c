@@ -629,7 +629,7 @@ static void b2FinalizeBodiesTask( int startIndex, int endIndex, int workerIndex,
 			int exportCapacity = b2GetStateExportCapacity();
 			if ( exportSlot >= 0 && exportSlot < exportCapacity )
 			{
-				b2ExportBodyState( (int)exportSlot, sim->transform, v, w );
+				b2ExportBodyStateIfMoved( (int)exportSlot, sim->transform, v, w );
 			}
 		}
 
