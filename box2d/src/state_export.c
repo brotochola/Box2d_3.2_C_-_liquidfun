@@ -91,6 +91,17 @@ void b2ExportBodyStateIfMoved( int entityIndex, b2WorldTransform transform, b2Ve
 	b2ExportBodyState( entityIndex, transform, linearVelocity, angularVelocity );
 }
 
+void b2ExportBodyVelocity( int entityIndex, b2Vec2 linearVelocity, float angularVelocity )
+{
+	if ( g_channels[b2_weed_vx] == NULL || entityIndex < 0 || entityIndex >= g_capacity )
+	{
+		return;
+	}
+	g_channels[b2_weed_vx][entityIndex] = linearVelocity.x;
+	g_channels[b2_weed_vy][entityIndex] = linearVelocity.y;
+	g_channels[b2_weed_angular_velocity][entityIndex] = angularVelocity;
+}
+
 int b2BodyStateWasStill( int entityIndex )
 {
 	if ( g_still == NULL || entityIndex < 0 || entityIndex >= g_still_capacity )

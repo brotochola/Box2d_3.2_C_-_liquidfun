@@ -664,9 +664,15 @@ static void export_body_move_events( b2WorldId worldId )
 		}
 
 		/* E-181: Box2D writes a move event for every awake body, moved or not. One whose pose the finalize export
-		   found unchanged is left out of the list WeedJS rewrites the spatial grid from, unless it fell asleep. */
+		   found unchanged is left out of the list WeedJS rewrites the spatial grid from, unless it fell asleep; with
+		   LiquidFun in the world its velocities are read again, since the coupling changes them after the finalize. */
 		if ( !events.moveEvents[i].fellAsleep && b2BodyStateWasStill( slot ) )
 		{
+			if ( g_particles != NULL )
+			{
+				b2BodyId stillId = events.moveEvents[i].bodyId;
+				b2ExportBodyVelocity( slot, b2Body_GetLinearVelocity( stillId ), b2Body_GetAngularVelocity( stillId ) );
+			}
 			continue;
 		}
 

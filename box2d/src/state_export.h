@@ -32,4 +32,6 @@ void b2ExportBodyState( int entityIndex, b2WorldTransform transform, b2Vec2 line
 void b2ExportBodyStateIfMoved( int entityIndex, b2WorldTransform transform, b2Vec2 linearVelocity, float angularVelocity );
 /* 1 when the body's last finalize export found its pose unchanged. */
 int b2BodyStateWasStill( int entityIndex );
+/* WeedJS E-181: the velocity channels alone. */
+void b2ExportBodyVelocity( int entityIndex, b2Vec2 linearVelocity, float angularVelocity );
 void b2ExportBodySleeping( int entityIndex, int sleeping );
