@@ -310,6 +310,11 @@ B2_API const uint32_t* lfParticleSystem_GetFlagsBuffer( const lfParticleSystem* 
 // ParticleComponent.tweenToAlpha0). Recomputed every lfParticleSystem_Step
 // by the same pass that ages/expires particles.
 B2_API const float* lfParticleSystem_GetAlphaBuffer( const lfParticleSystem* system );
+// WeedJS N-142: the index each particle had at the last ResetOrigins (a new particle: its own), carried through every
+// reorder; whether a reorder happened since; and the reset (every origin its own index, the flag cleared).
+B2_API const int* lfParticleSystem_GetOriginIndexBuffer( const lfParticleSystem* system );
+B2_API int lfParticleSystem_GetReordered( const lfParticleSystem* system );
+B2_API void lfParticleSystem_ResetOrigins( lfParticleSystem* system );
 B2_API const float* lfParticleSystem_GetViscousScaleBuffer( const lfParticleSystem* system );
 B2_API const uint32_t* lfParticleSystem_GetUserDataBuffer( const lfParticleSystem* system );
 B2_API const uint32_t* lfParticleSystem_GetColorBuffer( const lfParticleSystem* system );

@@ -360,6 +360,11 @@ struct lfParticleSystem
 	float* remainingLife;
 	float* totalLife;
 	float* renderAlpha;
+	// WeedJS N-142: the index each particle had at the last lfParticleSystem_ResetOrigins (a new particle: its own
+	// index), carried through every reorder (zombie compaction, rotation, extraction, split), and whether one happened
+	// since that reset. The engine keeps a particle's render statics by index and moves them with it.
+	int* originIndex;
+	int reordered;
 	// Per-particle multiplier on def.viscousStrength (default 1). Stamped at
 	// create; SetGroupViscousScale rewrites members. SolveViscous reads this.
 	float* viscousScale;
@@ -719,6 +724,7 @@ static bool EnsureCapacity( lfParticleSystem* sys, int minCapacity )
 	ok = ok && LfReallocAssign( (void**)&sys->remainingLife, (size_t)newCapacity * sizeof( float ) );
 	ok = ok && LfReallocAssign( (void**)&sys->totalLife, (size_t)newCapacity * sizeof( float ) );
 	ok = ok && LfReallocAssign( (void**)&sys->renderAlpha, (size_t)newCapacity * sizeof( float ) );
+	ok = ok && LfReallocAssign( (void**)&sys->originIndex, (size_t)newCapacity * sizeof( int ) );
 	ok = ok && LfReallocAssign( (void**)&sys->viscousScale, (size_t)newCapacity * sizeof( float ) );
 	ok = ok && LfReallocAssign( (void**)&sys->userData, (size_t)newCapacity * sizeof( uint32_t ) );
 	ok = ok && LfReallocAssign( (void**)&sys->color, (size_t)newCapacity * sizeof( uint32_t ) );
@@ -809,6 +815,7 @@ lfParticleSystem* lfParticleSystem_Create( b2WorldId worldId, const lfParticleSy
 		sys->remainingLife = (float*)malloc( (size_t)hint * sizeof( float ) );
 		sys->totalLife = (float*)malloc( (size_t)hint * sizeof( float ) );
 		sys->renderAlpha = (float*)malloc( (size_t)hint * sizeof( float ) );
+		sys->originIndex = (int*)malloc( (size_t)hint * sizeof( int ) );
 		sys->viscousScale = (float*)malloc( (size_t)hint * sizeof( float ) );
 		sys->userData = (uint32_t*)malloc( (size_t)hint * sizeof( uint32_t ) );
 		sys->color = (uint32_t*)malloc( (size_t)hint * sizeof( uint32_t ) );
@@ -866,6 +873,7 @@ void lfParticleSystem_Destroy( lfParticleSystem* sys )
 	free( sys->remainingLife );
 	free( sys->totalLife );
 	free( sys->renderAlpha );
+	free( sys->originIndex );
 	free( sys->viscousScale );
 	free( sys->userData );
 	free( sys->color );
@@ -919,6 +927,7 @@ int lfParticleSystem_CreateParticle( lfParticleSystem* sys, const lfParticleDef*
 	sys->remainingLife[i] = 0.0f;
 	sys->totalLife[i] = 0.0f;
 	sys->renderAlpha[i] = 1.0f;
+	sys->originIndex[i] = i;
 	sys->viscousScale[i] = 1.0f;
 	sys->userData[i] = def->userData;
 	sys->color[i] = def->color != 0 ? def->color : 0xFF3399FFu;
@@ -1530,6 +1539,8 @@ static int PermuteParticleRange( lfParticleSystem* sys, int first, int n, const 
 	PermuteSlice( sys->remainingLife, sizeof( float ), first, n, srcIndex, tmp );
 	PermuteSlice( sys->totalLife, sizeof( float ), first, n, srcIndex, tmp );
 	PermuteSlice( sys->renderAlpha, sizeof( float ), first, n, srcIndex, tmp );
+	PermuteSlice( sys->originIndex, sizeof( int ), first, n, srcIndex, tmp );
+	sys->reordered = 1;
 	PermuteSlice( sys->viscousScale, sizeof( float ), first, n, srcIndex, tmp );
 	PermuteSlice( sys->userData, sizeof( uint32_t ), first, n, srcIndex, tmp );
 	PermuteSlice( sys->color, sizeof( uint32_t ), first, n, srcIndex, tmp );
@@ -1922,6 +1933,7 @@ static void CopyParticle( lfParticleSystem* sys, int dst, int src )
 	sys->remainingLife[dst] = sys->remainingLife[src];
 	sys->totalLife[dst] = sys->totalLife[src];
 	sys->renderAlpha[dst] = sys->renderAlpha[src];
+	sys->originIndex[dst] = sys->originIndex[src];
 	sys->viscousScale[dst] = sys->viscousScale[src];
 	sys->userData[dst] = sys->userData[src];
 	sys->color[dst] = sys->color[src];
@@ -2049,6 +2061,8 @@ static void RotateBuffer( lfParticleSystem* sys, int start, int mid, int end )
 	RotateTyped( sys->remainingLife, sizeof( float ), start, mid, end );
 	RotateTyped( sys->totalLife, sizeof( float ), start, mid, end );
 	RotateTyped( sys->renderAlpha, sizeof( float ), start, mid, end );
+	RotateTyped( sys->originIndex, sizeof( int ), start, mid, end );
+	sys->reordered = 1;
 	RotateTyped( sys->viscousScale, sizeof( float ), start, mid, end );
 	RotateTyped( sys->userData, sizeof( uint32_t ), start, mid, end );
 	RotateTyped( sys->color, sizeof( uint32_t ), start, mid, end );
@@ -2105,6 +2119,11 @@ static void SolveZombie( lfParticleSystem* sys )
 			newCount++;
 			allParticleFlags |= f;
 		}
+	}
+
+	if ( newCount < count )
+	{
+		sys->reordered = 1;
 	}
 
 	RemapPairs( sys, newIndices, count );
@@ -4122,6 +4141,8 @@ void lfParticleSystem_SplitParticleGroup( lfParticleSystem* sys, lfParticleGroup
 			sys->remainingLife[dst] = sys->remainingLife[src];
 			sys->totalLife[dst] = sys->totalLife[src];
 			sys->renderAlpha[dst] = sys->renderAlpha[src];
+			sys->originIndex[dst] = sys->originIndex[src];
+			sys->reordered = 1;
 			sys->flags[src] |= lf_zombieParticle;
 			created++;
 		}
@@ -5118,6 +5139,29 @@ const uint32_t* lfParticleSystem_GetFlagsBuffer( const lfParticleSystem* sys )
 const float* lfParticleSystem_GetAlphaBuffer( const lfParticleSystem* sys )
 {
 	return sys->renderAlpha;
+}
+
+const int* lfParticleSystem_GetOriginIndexBuffer( const lfParticleSystem* sys )
+{
+	return sys != NULL ? sys->originIndex : NULL;
+}
+
+int lfParticleSystem_GetReordered( const lfParticleSystem* sys )
+{
+	return sys != NULL ? sys->reordered : 0;
+}
+
+void lfParticleSystem_ResetOrigins( lfParticleSystem* sys )
+{
+	if ( sys == NULL )
+	{
+		return;
+	}
+	for ( int i = 0; i < sys->count; i++ )
+	{
+		sys->originIndex[i] = i;
+	}
+	sys->reordered = 0;
 }
 
 const float* lfParticleSystem_GetViscousScaleBuffer( const lfParticleSystem* sys )

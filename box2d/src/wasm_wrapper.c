@@ -3505,6 +3505,34 @@ int get_particle_x_byte_offset( void )
 	return x == NULL ? 0 : (int)( (uintptr_t)x );
 }
 
+/* WeedJS N-142: the particles' origin indices (where each was at the last reset_particle_origins), whether a reorder
+   moved any since, and the reset. The engine moves its render statics with the particles from these. */
+EMSCRIPTEN_KEEPALIVE
+int get_particle_origin_byte_offset( void )
+{
+	if ( g_particles == NULL )
+	{
+		return 0;
+	}
+	const int* o = lfParticleSystem_GetOriginIndexBuffer( g_particles );
+	return o == NULL ? 0 : (int)( (uintptr_t)o );
+}
+
+EMSCRIPTEN_KEEPALIVE
+int particle_reordered( void )
+{
+	return g_particles == NULL ? 0 : lfParticleSystem_GetReordered( g_particles );
+}
+
+EMSCRIPTEN_KEEPALIVE
+void reset_particle_origins( void )
+{
+	if ( g_particles != NULL )
+	{
+		lfParticleSystem_ResetOrigins( g_particles );
+	}
+}
+
 EMSCRIPTEN_KEEPALIVE
 int get_particle_alpha_byte_offset( void )
 {
