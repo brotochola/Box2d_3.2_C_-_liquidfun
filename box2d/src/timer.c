@@ -251,6 +251,7 @@ void b2JoinThread( b2Thread* t )
 #include <time.h>
 #if defined( __EMSCRIPTEN__ )
 #include <emscripten/emscripten.h>
+#include <emscripten/threading.h>
 #endif
 
 uint64_t b2GetTicks( void )
@@ -290,7 +291,13 @@ float b2GetMillisecondsAndReset( uint64_t* ticks )
 
 void b2Yield( void )
 {
+#if defined( __EMSCRIPTEN__ )
+	// WeedJS E-256: Emscripten's sched_yield reads the clock (a call out to JavaScript that makes a heap number) only to
+	// hand it to a timer check this build does not have. Process the queue the yield would, with no clock.
+	emscripten_current_thread_process_queued_calls();
+#else
 	sched_yield();
+#endif
 }
 
 #include <pthread.h>
