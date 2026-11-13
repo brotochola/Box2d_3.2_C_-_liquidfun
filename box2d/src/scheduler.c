@@ -52,6 +52,12 @@ typedef struct b2Scheduler
 	b2Semaphore* taskSemaphore;
 	b2AtomicInt sleeperCount;
 	b2AtomicInt shutdown;
+
+#if defined( __EMSCRIPTEN__ )
+	// WeedJS E-255: the turns a spin took to reach its deadline when last measured (0: not yet), and the spins since.
+	b2AtomicInt spinTurns;
+	b2AtomicInt spinCount;
+#endif
 } b2Scheduler;
 
 static bool b2SchedulerHasPending( b2Scheduler* scheduler )
@@ -68,6 +74,50 @@ static bool b2SchedulerHasPending( b2Scheduler* scheduler )
 	return false;
 }
 
+#if defined( __EMSCRIPTEN__ )
+// WeedJS E-255. Under Emscripten each clock read is a call out to JavaScript that returns a heap number: reading it every
+// 64th turn was still about 460 calls a frame in a busy scene. A spin that is measured (the first ones, then one in 256)
+// reads the clock as before and records how many turns reached the deadline; the others spin that many turns and read no
+// clock. The deadline is a wait budget, not a promise: a spin a little long or short only moves when a thread sleeps.
+#define B2_SCHEDULER_MEASURE_EVERY 256
+
+static bool b2SchedulerSpin( b2Scheduler* scheduler )
+{
+	int turns = b2AtomicLoadInt( &scheduler->spinTurns );
+	int count = b2AtomicFetchAddInt( &scheduler->spinCount, 1 );
+	if ( turns > 0 && ( count & ( B2_SCHEDULER_MEASURE_EVERY - 1 ) ) != 0 )
+	{
+		for ( int spin = 0; spin < turns; ++spin )
+		{
+			if ( b2SchedulerHasPending( scheduler ) || b2AtomicLoadInt( &scheduler->shutdown ) != 0 )
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	uint64_t ticks = b2GetTicks();
+	for ( unsigned spin = 1;; ++spin )
+	{
+		if ( b2SchedulerHasPending( scheduler ) || b2AtomicLoadInt( &scheduler->shutdown ) != 0 )
+		{
+			return true;
+		}
+
+		if ( ( spin & 63u ) != 0 )
+		{
+			continue;
+		}
+
+		if ( b2GetMilliseconds( ticks ) >= B2_SCHEDULER_SPIN_MILLISECONDS )
+		{
+			b2AtomicStoreInt( &scheduler->spinTurns, (int)spin );
+			return false;
+		}
+	}
+}
+#else
 static bool b2SchedulerSpin( b2Scheduler* scheduler )
 {
 	uint64_t ticks = b2GetTicks();
@@ -97,6 +147,8 @@ static bool b2SchedulerSpin( b2Scheduler* scheduler )
 		}
 	}
 }
+
+#endif
 
 static bool b2SchedulerTakeSleeper( b2Scheduler* scheduler )
 {
@@ -190,6 +242,10 @@ b2Scheduler* b2CreateScheduler( int workerCount )
 	b2AtomicStoreInt( &scheduler->sleeperCount, 0 );
 	b2AtomicStoreInt( &scheduler->shutdown, 0 );
 	b2AtomicStoreInt( &scheduler->nextSlot, 0 );
+#if defined( __EMSCRIPTEN__ )
+	b2AtomicStoreInt( &scheduler->spinTurns, 0 );
+	b2AtomicStoreInt( &scheduler->spinCount, 0 );
+#endif
 
 	// Background threads use indices 1..workerCount-1.
 	// Main thread uses index 0.
