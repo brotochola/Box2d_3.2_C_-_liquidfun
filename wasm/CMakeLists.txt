@@ -110,9 +110,17 @@ if(BOX2D_WEED_INTEGRATION)
 	set(BOX2D_PRE_JS "${CMAKE_CURRENT_SOURCE_DIR}/../weedjs/weed_pre.js")
 	list(APPEND WASM_LINK_FLAGS "--pre-js=${BOX2D_PRE_JS}")
 	list(APPEND BOX2D_LINK_DEPENDS "${BOX2D_PRE_JS}")
+	# WeedJS E-235: library entries WeedJS replaces (the clock reads performance.timeOrigin once, not per call).
+	set(BOX2D_WEED_LIB "${CMAKE_CURRENT_SOURCE_DIR}/weed_lib.js")
+	list(APPEND WASM_LINK_FLAGS "--js-library=${BOX2D_WEED_LIB}")
+	list(APPEND BOX2D_LINK_DEPENDS "${BOX2D_WEED_LIB}")
 endif()
 
 target_compile_options(box2d PRIVATE -pthread ${BOX2D_WASM_SIMD_FLAGS} -ffast-math -fno-trapping-math)
+if(BOX2D_WEED_INTEGRATION)
+	# WeedJS E-235: no clock read for the profile fields WeedJS does not read (box2d/src/core.h).
+	target_compile_definitions(box2d PRIVATE B2_COARSE_PROFILE=1)
+endif()
 target_compile_options(box2d_wasm PRIVATE -pthread ${BOX2D_WASM_SIMD_FLAGS} -ffast-math -fno-trapping-math)
 # Box2D's own CMake already gives the box2d library BOX2D_DISABLE_SIMD; this hands the same switch
 # to the wrapper and liquidfun-c.

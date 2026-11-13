@@ -660,7 +660,7 @@ void b2SplitIslandTask( void* context )
 {
 	b2TracyCZoneNC( split, "Split Island", b2_colorOlive, true );
 
-	uint64_t ticks = b2GetTicks();
+	uint64_t ticks = b2FineTicks();
 	b2World* world = context;
 
 	B2_ASSERT( world->splitIslandId != B2_NULL_INDEX );
@@ -668,7 +668,7 @@ void b2SplitIslandTask( void* context )
 	b2SplitIsland( world, world->splitIslandId );
 
 	world->splitIslandId = B2_NULL_INDEX;
-	world->profile.splitIslands += b2GetMilliseconds( ticks );
+	world->profile.splitIslands += b2FineMilliseconds( ticks );
 	b2TracyCZoneEnd( split );
 }
 

@@ -939,9 +939,9 @@ void b2World_Step( b2WorldId worldId, float timeStep, int subStepCount )
 
 	// Update collision pairs and create contacts
 	{
-		uint64_t pairTicks = b2GetTicks();
+		uint64_t pairTicks = b2FineTicks();
 		b2UpdateBroadPhasePairs( world );
-		world->profile.pairs = b2GetMilliseconds( pairTicks );
+		world->profile.pairs = b2FineMilliseconds( pairTicks );
 	}
 
 	b2StepContext context = { 0 };

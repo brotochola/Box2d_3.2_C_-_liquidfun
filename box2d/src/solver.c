@@ -1069,7 +1069,7 @@ static void b2SolverTask( void* taskContext )
 		b2_stageStoreImpulses
 		*/
 
-		uint64_t ticks = b2GetTicks();
+		uint64_t ticks = b2FineTicks();
 
 		int bodySyncIndex = 1;
 		int stageIndex = 0;
@@ -1094,7 +1094,7 @@ static void b2SolverTask( void* taskContext )
 		b2PrepareJoints_Overflow( context );
 		b2PrepareContacts_Overflow( context );
 
-		profile->prepareConstraints += b2GetMillisecondsAndReset( &ticks );
+		profile->prepareConstraints += b2FineMillisecondsAndReset( &ticks );
 
 		int graphSyncIndex = 1;
 		int subStepCount = context->subStepCount;
@@ -1111,7 +1111,7 @@ static void b2SolverTask( void* taskContext )
 			iterationStageIndex += 1;
 			bodySyncIndex += 1;
 
-			profile->integrateVelocities += b2GetMillisecondsAndReset( &ticks );
+			profile->integrateVelocities += b2FineMillisecondsAndReset( &ticks );
 
 			// Warm start constraints
 			b2WarmStartJoints_Overflow( context );
@@ -1126,7 +1126,7 @@ static void b2SolverTask( void* taskContext )
 			}
 			graphSyncIndex += 1;
 
-			profile->warmStart += b2GetMillisecondsAndReset( &ticks );
+			profile->warmStart += b2FineMillisecondsAndReset( &ticks );
 
 			// Solve constraints
 			bool useBias = true;
@@ -1146,7 +1146,7 @@ static void b2SolverTask( void* taskContext )
 				graphSyncIndex += 1;
 			}
 
-			profile->solveImpulses += b2GetMillisecondsAndReset( &ticks );
+			profile->solveImpulses += b2FineMillisecondsAndReset( &ticks );
 
 			// Integrate positions
 			B2_ASSERT( stages[iterationStageIndex].type == b2_stageIntegratePositions );
@@ -1155,7 +1155,7 @@ static void b2SolverTask( void* taskContext )
 			iterationStageIndex += 1;
 			bodySyncIndex += 1;
 
-			profile->integratePositions += b2GetMillisecondsAndReset( &ticks );
+			profile->integratePositions += b2FineMillisecondsAndReset( &ticks );
 
 			// Relax constraints
 			useBias = false;
@@ -1173,7 +1173,7 @@ static void b2SolverTask( void* taskContext )
 				graphSyncIndex += 1;
 			}
 
-			profile->relaxImpulses += b2GetMillisecondsAndReset( &ticks );
+			profile->relaxImpulses += b2FineMillisecondsAndReset( &ticks );
 		}
 
 		// Advance the stage according to the sub-stepping tasks just completed
@@ -1198,7 +1198,7 @@ static void b2SolverTask( void* taskContext )
 				graphSyncIndex += 1;
 			}
 
-			profile->restitution += b2GetMillisecondsAndReset( &ticks );
+			profile->restitution += b2FineMillisecondsAndReset( &ticks );
 		}
 
 		stageIndex += activeColorCount;
@@ -1210,7 +1210,7 @@ static void b2SolverTask( void* taskContext )
 		B2_ASSERT( stages[stageIndex].type == b2_stageStoreImpulses );
 		b2ExecuteMainStage( stages + stageIndex, context, syncBits );
 
-		profile->storeImpulses += b2GetMillisecondsAndReset( &ticks );
+		profile->storeImpulses += b2FineMillisecondsAndReset( &ticks );
 
 		// Signal workers to finish
 		b2AtomicStoreU32( &context->atomicSyncBits, UINT_MAX );
@@ -1312,7 +1312,7 @@ void b2Solve( b2World* world, b2StepContext* stepContext )
 	// Solve constraints using graph coloring
 	{
 		b2TracyCZoneNC( solver_setup, "Solver Setup", b2_colorDarkOrange, true );
-		uint64_t setupTicks = b2GetTicks();
+		uint64_t setupTicks = b2FineTicks();
 
 		// Prepare buffers for bullets
 		b2AtomicStoreInt( &stepContext->bulletBodyCount, 0 );
@@ -1577,11 +1577,11 @@ void b2Solve( b2World* world, b2StepContext* stepContext )
 		b2AtomicStoreU32( &stepContext->atomicSyncBits, 0 );
 		b2AtomicStoreInt( &stepContext->mainClaimed, 0 );
 
-		world->profile.solverSetup = b2GetMillisecondsAndReset( &setupTicks );
+		world->profile.solverSetup = b2FineMillisecondsAndReset( &setupTicks );
 		b2TracyCZoneEnd( solver_setup );
 
 		b2TracyCZoneNC( solve_constraints, "Solve Constraints", b2_colorIndigo, true );
-		uint64_t constraintTicks = b2GetTicks();
+		uint64_t constraintTicks = b2FineTicks();
 
 		int jointIdCapacity = b2GetIdCapacity( &world->jointIdPool );
 		int contactIdCapacity = b2GetIdCapacity( &world->contactIdPool );
@@ -1635,11 +1635,11 @@ void b2Solve( b2World* world, b2StepContext* stepContext )
 		}
 		world->splitIslandId = B2_NULL_INDEX;
 
-		world->profile.constraints = b2GetMillisecondsAndReset( &constraintTicks );
+		world->profile.constraints = b2FineMillisecondsAndReset( &constraintTicks );
 		b2TracyCZoneEnd( solve_constraints );
 
 		b2TracyCZoneNC( update_transforms, "Update Transforms", b2_colorMediumSeaGreen, true );
-		uint64_t transformTicks = b2GetTicks();
+		uint64_t transformTicks = b2FineTicks();
 
 		// Prepare contact, enlarged body, and island bit sets used in body finalization.
 		int awakeIslandCount = awakeSet->islandSims.count;
@@ -1675,14 +1675,14 @@ void b2Solve( b2World* world, b2StepContext* stepContext )
 		b2StackFree( &world->stack, overflowContacts );
 		b2StackFree( &world->stack, wideContactConstraints );
 
-		world->profile.transforms = b2GetMilliseconds( transformTicks );
+		world->profile.transforms = b2FineMilliseconds( transformTicks );
 		b2TracyCZoneEnd( update_transforms );
 	}
 
 	// Report joint events
 	{
 		b2TracyCZoneNC( joint_events, "Joint Events", b2_colorPeru, true );
-		uint64_t jointEventTicks = b2GetTicks();
+		uint64_t jointEventTicks = b2FineTicks();
 
 		// Gather bits for all joints that have force/torque events
 		b2BitSet* jointStateBitSet = &world->taskContexts.data[0].jointStateBitSet;
@@ -1730,14 +1730,14 @@ void b2Solve( b2World* world, b2StepContext* stepContext )
 			}
 		}
 
-		world->profile.jointEvents = b2GetMilliseconds( jointEventTicks );
+		world->profile.jointEvents = b2FineMilliseconds( jointEventTicks );
 		b2TracyCZoneEnd( joint_events );
 	}
 
 	// Report hit events
 	{
 		b2TracyCZoneNC( hit_events, "Hit Events", b2_colorRosyBrown, true );
-		uint64_t hitTicks = b2GetTicks();
+		uint64_t hitTicks = b2FineTicks();
 
 		B2_ASSERT( world->contactHitEvents.count == 0 );
 
@@ -1849,13 +1849,13 @@ void b2Solve( b2World* world, b2StepContext* stepContext )
 			}
 		}
 
-		world->profile.hitEvents = b2GetMilliseconds( hitTicks );
+		world->profile.hitEvents = b2FineMilliseconds( hitTicks );
 		b2TracyCZoneEnd( hit_events );
 	}
 
 	{
 		b2TracyCZoneNC( refit_bvh, "Refit BVH", b2_colorFireBrick, true );
-		uint64_t refitTicks = b2GetTicks();
+		uint64_t refitTicks = b2FineTicks();
 
 		b2BroadPhase* bp = &world->broadPhase;
 		b2DynamicTree_Refit( bp->trees + b2_kinematicBody );
@@ -1863,7 +1863,7 @@ void b2Solve( b2World* world, b2StepContext* stepContext )
 
 		b2ValidateBroadphase( &world->broadPhase );
 
-		world->profile.refit = b2GetMilliseconds( refitTicks );
+		world->profile.refit = b2FineMilliseconds( refitTicks );
 		b2TracyCZoneEnd( refit_bvh );
 	}
 
@@ -1873,7 +1873,7 @@ void b2Solve( b2World* world, b2StepContext* stepContext )
 	if ( bulletBodyCount > 0 )
 	{
 		b2TracyCZoneNC( bullets, "Bullets", b2_colorLightYellow, true );
-		uint64_t bulletTicks = b2GetTicks();
+		uint64_t bulletTicks = b2FineTicks();
 
 		// Fast bullet bodies
 		// Note: a bullet body may be moving slow
@@ -1930,7 +1930,7 @@ void b2Solve( b2World* world, b2StepContext* stepContext )
 			}
 		}
 
-		world->profile.bullets = b2GetMilliseconds( bulletTicks );
+		world->profile.bullets = b2FineMilliseconds( bulletTicks );
 		b2TracyCZoneEnd( bullets );
 	}
 
@@ -1942,7 +1942,7 @@ void b2Solve( b2World* world, b2StepContext* stepContext )
 	// Report sensor hits. This may include bullets sensor hits.
 	{
 		b2TracyCZoneNC( sensor_hits, "Sensor Hits", b2_colorPowderBlue, true );
-		uint64_t sensorHitTicks = b2GetTicks();
+		uint64_t sensorHitTicks = b2FineTicks();
 
 		int workerCount = world->workerCount;
 		B2_ASSERT( workerCount == world->taskContexts.count );
@@ -1968,7 +1968,7 @@ void b2Solve( b2World* world, b2StepContext* stepContext )
 			}
 		}
 
-		world->profile.sensorHits = b2GetMilliseconds( sensorHitTicks );
+		world->profile.sensorHits = b2FineMilliseconds( sensorHitTicks );
 		b2TracyCZoneEnd( sensor_hits );
 	}
 

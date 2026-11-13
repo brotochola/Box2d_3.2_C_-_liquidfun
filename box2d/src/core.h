@@ -5,6 +5,19 @@
 
 #include "box2d/base.h"
 
+// WeedJS E-235: the profile's finer timers (solver stages, TOI, island splits, pairs and the solver's other passes).
+// With B2_COARSE_PROFILE they read no clock: in a browser each b2GetTicks is a call out to JavaScript that makes a heap
+// number, hundreds a step. b2Profile keeps step, collide, solve, sleepIslands and sensors; the finer fields read 0.
+#if defined( B2_COARSE_PROFILE )
+#define b2FineTicks() ( (uint64_t)0 )
+#define b2FineMilliseconds( ticks ) ( (void)( ticks ), 0.0f )
+#define b2FineMillisecondsAndReset( ticks ) ( (void)( ticks ), 0.0f )
+#else
+#define b2FineTicks() b2GetTicks()
+#define b2FineMilliseconds( ticks ) b2GetMilliseconds( ticks )
+#define b2FineMillisecondsAndReset( ticks ) b2GetMillisecondsAndReset( ticks )
+#endif
+
 // clang-format off
 
 // for performance comparisons

@@ -1148,7 +1148,7 @@ static float b2EvaluateSeparation( const b2SeparationFunction* f, int indexA, in
 b2TOIOutput b2TimeOfImpact( const b2TOIInput* input )
 {
 #if B2_SNOOP_TOI_COUNTERS
-	uint64_t ticks = b2GetTicks();
+	uint64_t ticks = b2FineTicks();
 	++b2_toiCalls;
 #endif
 
@@ -1432,7 +1432,7 @@ b2TOIOutput b2TimeOfImpact( const b2TOIInput* input )
 #if B2_SNOOP_TOI_COUNTERS
 	b2_toiMaxDistanceIterations = b2MaxInt( b2_toiMaxDistanceIterations, distanceIterations );
 
-	float time = b2GetMilliseconds( ticks );
+	float time = b2FineMilliseconds( ticks );
 	b2_toiMaxTime = b2MaxFloat( b2_toiMaxTime, time );
 	b2_toiTime += time;
 #endif
