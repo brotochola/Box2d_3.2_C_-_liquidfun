@@ -5,10 +5,6 @@
 #include "state_export.h"
 #include "liquidfun/lf_particle_system.h"
 
-// WeedJS E-298: physics_world.c, the scheduler's step count around the world step and LiquidFun's.
-void b2World_BeginTaskSpan( b2WorldId worldId );
-void b2World_EndTaskSpan( b2WorldId worldId );
-
 #include <emscripten.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -2471,7 +2467,6 @@ void step_world( uint32_t worldPacked, float timeStep, int subStepCount )
 	{
 		mark_active_dynamics_sleeping();
 	}
-	b2World_BeginTaskSpan( worldId );
 	b2World_Step( worldId, timeStep, subStepCount );
 	g_liquidfun_step_ms = 0.0f;
 	if ( g_particles != NULL )
@@ -2481,7 +2476,6 @@ void step_world( uint32_t worldPacked, float timeStep, int subStepCount )
 		g_particle_count_value = lfParticleSystem_GetParticleCount( g_particles );
 		g_liquidfun_step_ms = (float)( emscripten_get_now() - t0 );
 	}
-	b2World_EndTaskSpan( worldId );
 	export_contact_events( worldId );
 	export_sensor_events( worldId );
 	export_joint_events( worldId );

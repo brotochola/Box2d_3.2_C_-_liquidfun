@@ -58,7 +58,7 @@ typedef struct b2Scheduler
 	b2AtomicInt spinTurns;
 	b2AtomicInt spinCount;
 #endif
-	// WeedJS E-298: the steps running (b2SchedulerBeginStep): above 0, a worker with nothing to do spins instead of sleeping.
+	// WeedJS E-298: 1 while a world step runs: a worker with nothing to do spins instead of sleeping.
 	b2AtomicInt stepping;
 } b2Scheduler;
 
@@ -222,7 +222,7 @@ static void b2SchedulerWorkerMain( void* context )
 		// (Atomics.wait in the browser) took up to ~1.5 ms on Windows, longer than most of a step's phases, so the
 		// calling thread ran them nearly alone (ballsHeavy: 42 % of its time in solver blocks against 16 % on each
 		// worker, which slept 63 % in _do_futex_wait). Between steps the workers sleep as before.
-		if ( b2AtomicLoadInt( &scheduler->stepping ) > 0 )
+		if ( b2AtomicLoadInt( &scheduler->stepping ) != 0 )
 		{
 			continue;
 		}
@@ -299,14 +299,9 @@ void b2ResetScheduler( b2Scheduler* scheduler )
 	b2AtomicStoreInt( &scheduler->nextSlot, 0 );
 }
 
-void b2SchedulerBeginStep( b2Scheduler* scheduler )
+void b2SchedulerSetStepping( b2Scheduler* scheduler, int stepping )
 {
-	b2AtomicFetchAddInt( &scheduler->stepping, 1 );
-}
-
-void b2SchedulerEndStep( b2Scheduler* scheduler )
-{
-	b2AtomicFetchAddInt( &scheduler->stepping, -1 );
+	b2AtomicStoreInt( &scheduler->stepping, stepping );
 }
 
 void* b2SchedulerEnqueueTask( b2TaskCallback* task, void* taskContext, void* userContext )
