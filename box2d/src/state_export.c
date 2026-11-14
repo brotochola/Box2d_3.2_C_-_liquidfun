@@ -85,6 +85,33 @@ void b2BindStateExportBuffer( float* buffer, int bodyCount )
 					  bodyCount );
 }
 
+/* WeedJS E-308: the step's export of a body that moved. One that moved without turning (a fixed rotation: Predator's
+   people) keeps the rotation the channels hold, so its angle (an atan2) is not computed again and the three columns
+   WeedJS's other workers read are not written with the values they hold (each write takes the line from a reader's
+   cache). Only from the step: there the channels hold what the last export wrote, while a command (setRotationCS) may
+   have written rotC and rotS for the export that follows it to complete with the angle. The caller has checked the
+   channels and the index. */
+static void b2ExportMovedBodyState( int entityIndex, b2WorldTransform transform, b2Vec2 linearVelocity, float angularVelocity )
+{
+	g_channels[b2_weed_x][entityIndex] = transform.p.x;
+	g_channels[b2_weed_y][entityIndex] = transform.p.y;
+	g_channels[b2_weed_vx][entityIndex] = linearVelocity.x;
+	g_channels[b2_weed_vy][entityIndex] = linearVelocity.y;
+	g_channels[b2_weed_angular_velocity][entityIndex] = angularVelocity;
+	float* rotC = g_channels[b2_weed_rot_c];
+	float* rotS = g_channels[b2_weed_rot_s];
+	if ( rotC[entityIndex] != transform.q.c || rotS[entityIndex] != transform.q.s )
+	{
+		if ( g_channels[b2_weed_rotation] != NULL )
+		{
+			g_channels[b2_weed_rotation][entityIndex] = b2Atan2( transform.q.s, transform.q.c );
+		}
+		rotC[entityIndex] = transform.q.c;
+		rotS[entityIndex] = transform.q.s;
+	}
+	b2ExportBodySleeping( entityIndex, 0 );
+}
+
 void b2ExportBodyStateIfMoved( int entityIndex, b2WorldTransform transform, b2Vec2 linearVelocity, float angularVelocity )
 {
 	if ( g_channels[b2_weed_x] == NULL || g_channels[b2_weed_rot_c] == NULL || g_channels[b2_weed_rot_s] == NULL ||
@@ -108,7 +135,7 @@ void b2ExportBodyStateIfMoved( int entityIndex, b2WorldTransform transform, b2Ve
 	}
 
 	g_still[entityIndex] = 0;
-	b2ExportBodyState( entityIndex, transform, linearVelocity, angularVelocity );
+	b2ExportMovedBodyState( entityIndex, transform, linearVelocity, angularVelocity );
 }
 
 void b2ExportBodyVelocity( int entityIndex, b2Vec2 linearVelocity, float angularVelocity )
