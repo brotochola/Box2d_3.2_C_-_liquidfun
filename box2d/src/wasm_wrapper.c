@@ -682,14 +682,17 @@ static void export_body_move_events( b2WorldId worldId )
 
 		/* E-182: the solver's finalize exported this state already. The velocities are read again (LiquidFun's
 		   coupling changes them after the finalize); the pose only when it moved after it (continuous collision's
-		   time of impact) or the body fell asleep. */
+		   time of impact) or the body fell asleep.
+		   E-305: without LiquidFun a body whose pose is the one the finalize exported keeps the velocities it exported
+		   too (continuous collision changes a velocity only with the pose), so they are not read again: two public
+		   calls a moved body (Predator: b2Body_GetLinearVelocity alone 22.8 ms/s of the physics thread). */
 		b2BodyId bodyId = events.moveEvents[i].bodyId;
 		if ( events.moveEvents[i].fellAsleep || b2BodyPoseDiffers( slot, events.moveEvents[i].transform ) )
 		{
 			b2ExportBodyState( slot, events.moveEvents[i].transform, b2Body_GetLinearVelocity( bodyId ),
 							   b2Body_GetAngularVelocity( bodyId ) );
 		}
-		else
+		else if ( g_particles != NULL )
 		{
 			b2ExportBodyVelocity( slot, b2Body_GetLinearVelocity( bodyId ), b2Body_GetAngularVelocity( bodyId ) );
 		}
