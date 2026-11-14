@@ -13,6 +13,26 @@ static int g_capacity;
 static uint8_t* g_still = NULL;
 static int g_still_capacity = 0;
 
+/* WeedJS E-288: the accelerations bound for the next step (b2BindWeedAccelerations), taken once by its solver. */
+static b2WeedAccelColumns g_accel;
+static int g_accel_bound = 0;
+
+void b2BindWeedAccelerations( const b2WeedAccelColumns* columns )
+{
+	g_accel = *columns;
+	g_accel_bound = 1;
+}
+
+const b2WeedAccelColumns* b2TakeWeedAccelerations( void )
+{
+	if ( g_accel_bound == 0 )
+	{
+		return NULL;
+	}
+	g_accel_bound = 0;
+	return &g_accel;
+}
+
 int b2GetStateExportCapacity( void )
 {
 	return g_capacity;

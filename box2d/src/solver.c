@@ -38,12 +38,54 @@ typedef struct b2WorkerContext
 } b2WorkerContext;
 
 // Integrate velocities and apply damping
+/* WeedJS E-288: logic's accelerations added to a block of awake body sims, as bodies_apply_accelerations did through
+   b2Body_ApplyForceToCenter and b2Body_ApplyTorque (the products in float, added to the force and torque). */
+static void b2WeedApplyAccelerations( const b2WeedAccelColumns* a, b2BodySim* sims, int count, const b2Body* bodies )
+{
+	for ( int k = 0; k < count; ++k )
+	{
+		b2BodySim* sim = sims + k;
+		// As those calls: a dynamic body only.
+		const b2Body* body = bodies + sim->bodyId;
+		if ( body->type != b2_dynamicBody )
+		{
+			continue;
+		}
+		intptr_t slot = (intptr_t)body->userData;
+		if ( slot < 0 || slot >= a->capacity )
+		{
+			continue;
+		}
+		float m = a->mass[slot];
+		float bodyMass = m > 0.0f ? m : 1.0f;
+		float fx = a->ax[slot];
+		float fy = a->ay[slot];
+		if ( fx != 0.0f || fy != 0.0f )
+		{
+			sim->force = b2Add( sim->force, (b2Vec2){ fx * bodyMass, fy * bodyMass } );
+		}
+		float aa = a->angularAccel[slot];
+		if ( aa != 0.0f && !( a->fixedRotation != NULL && a->fixedRotation[slot] ) )
+		{
+			float in = a->inertia != NULL ? a->inertia[slot] : 0.0f;
+			sim->torque += aa * ( in > 0.0f ? in : bodyMass );
+		}
+	}
+}
+
 static void b2IntegrateVelocitiesTask( b2SolverBlock block, b2StepContext* context )
 {
 	b2TracyCZoneNC( integrate_velocity, "IntVel", b2_colorDeepPink, true );
 
 	b2BodyState* states = context->states;
 	b2BodySim* sims = context->sims;
+
+	// WeedJS E-288: the first substep adds logic's accelerations to the forces here, each sim at hand, in parallel.
+	if ( context->weedAccelerations != NULL )
+	{
+		b2WeedApplyAccelerations( context->weedAccelerations, sims + block.startIndex, block.count,
+								  context->world->bodies.data );
+	}
 
 	B2_VALIDATE( block.startIndex + block.count <= context->world->solverSets.data[b2_awakeSet].bodyStates.count );
 
@@ -1098,6 +1140,8 @@ static void b2SolverTask( void* taskContext )
 
 		int graphSyncIndex = 1;
 		int subStepCount = context->subStepCount;
+		// WeedJS E-288: logic's accelerations, applied by the first substep's velocity integration.
+		const b2WeedAccelColumns* weedAccelerations = b2TakeWeedAccelerations();
 		for ( int subStepIndex = 0; subStepIndex < subStepCount; ++subStepIndex )
 		{
 			// stage index restarted each iteration
@@ -1107,7 +1151,9 @@ static void b2SolverTask( void* taskContext )
 			// Integrate velocities
 			syncBits = ( bodySyncIndex << 16 ) | iterationStageIndex;
 			B2_ASSERT( stages[iterationStageIndex].type == b2_stageIntegrateVelocities );
+			context->weedAccelerations = subStepIndex == 0 ? weedAccelerations : NULL;
 			b2ExecuteMainStage( stages + iterationStageIndex, context, syncBits );
+			context->weedAccelerations = NULL;
 			iterationStageIndex += 1;
 			bodySyncIndex += 1;
 
@@ -1322,6 +1368,7 @@ void b2Solve( b2World* world, b2StepContext* stepContext )
 		b2GraphColor* colors = graph->colors;
 
 		stepContext->sims = awakeSet->bodySims.data;
+		stepContext->weedAccelerations = NULL;
 		stepContext->states = awakeSet->bodyStates.data;
 
 		// count contacts, joints, and colors

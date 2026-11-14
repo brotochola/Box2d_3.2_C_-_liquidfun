@@ -1681,12 +1681,18 @@ void body_apply_torque( int slot, float torque, int wake )
    memory: a static body's accelerations are cleared; any other gets ax, ay times its mass (1 when not positive) as a
    force at its centre, and angularAccel times its inertia (its mass when not positive) as a torque unless its rotation
    is fixed, both waking it, as body_apply_force_center and body_apply_torque would from JS (the products in float,
-   which JS rounds to float at the call). inertia and fixedRotation may be 0 (absent). */
+   which JS rounds to float at the call). inertia and fixedRotation may be 0 (absent).
+   E-288: the forces and torques are no longer applied here, one public call per body on the physics thread: the
+   columns are bound for the next step, whose first substep adds them to the awake bodies in its velocity integration
+   (b2WeedApplyAccelerations, in parallel). Here a sleeping body (the sleeping paint, kept by the step's export and
+   body_set_awake) that has something to apply is woken first, as those calls would have woken it. */
 EMSCRIPTEN_KEEPALIVE
 void bodies_apply_accelerations( const uint16_t* list, int count, float* ax, float* ay, float* angularAccel,
 								 const float* mass, const float* inertia, const uint8_t* isStatic,
 								 const uint8_t* fixedRotation )
 {
+	b2WeedAccelColumns columns = { ax, ay, angularAccel, mass, inertia, fixedRotation, g_capacity };
+	b2BindWeedAccelerations( &columns );
 	for ( int n = 0; n < count; ++n )
 	{
 		int i = list[n];
@@ -1697,19 +1703,18 @@ void bodies_apply_accelerations( const uint16_t* list, int count, float* ax, flo
 			angularAccel[i] = 0.0f;
 			continue;
 		}
-		float m = mass[i];
-		float bodyMass = m > 0.0f ? m : 1.0f;
-		float fx = ax[i];
-		float fy = ay[i];
-		if ( fx != 0.0f || fy != 0.0f )
+		if ( g_slots[i].bodyType != b2_game_dynamic || g_sleeping_buffer == NULL || g_sleeping_buffer[i] == 0 )
 		{
-			body_apply_force_center( i, fx * bodyMass, fy * bodyMass, 1 );
+			continue;
 		}
-		float aa = angularAccel[i];
-		if ( aa != 0.0f && !( fixedRotation != NULL && fixedRotation[i] ) )
+		int torque = angularAccel[i] != 0.0f && !( fixedRotation != NULL && fixedRotation[i] );
+		if ( ax[i] != 0.0f || ay[i] != 0.0f || torque )
 		{
-			float in = inertia != NULL ? inertia[i] : 0.0f;
-			body_apply_torque( i, aa * ( in > 0.0f ? in : bodyMass ), 1 );
+			b2BodyId bodyId = slot_body( i );
+			if ( B2_IS_NON_NULL( bodyId ) )
+			{
+				b2Body_SetAwake( bodyId, true );
+			}
 		}
 	}
 }
@@ -1724,6 +1729,11 @@ void body_set_awake( int slot, int awake )
 	}
 
 	b2Body_SetAwake( bodyId, awake != 0 );
+	// E-288: the sleeping paint follows a body put to sleep here, so bodies_apply_accelerations wakes it again.
+	if ( awake == 0 && !b2Body_IsAwake( bodyId ) )
+	{
+		b2ExportBodySleeping( slot, 1 );
+	}
 }
 
 EMSCRIPTEN_KEEPALIVE
@@ -2468,6 +2478,8 @@ void step_world( uint32_t worldPacked, float timeStep, int subStepCount )
 		mark_active_dynamics_sleeping();
 	}
 	b2World_Step( worldId, timeStep, subStepCount );
+	// E-288: a step whose solver did not run (nothing awake) leaves no binding for the next one.
+	b2TakeWeedAccelerations();
 	g_liquidfun_step_ms = 0.0f;
 	if ( g_particles != NULL )
 	{

@@ -214,6 +214,9 @@ typedef struct b2StepContext
 	int stageCount;
 	bool enableWarmStarting;
 
+	// WeedJS E-288: logic's accelerations while the first substep integrates velocities, NULL otherwise.
+	const struct b2WeedAccelColumns* weedAccelerations;
+
 	// padding to prevent false sharing
 	char padding1[64];
 
