@@ -882,6 +882,26 @@ static void b2Collide( b2StepContext* context )
 	b2TracyCZoneEnd( collide );
 }
 
+// WeedJS E-298: the weed build's step_world raises the scheduler's step count around the world step and LiquidFun's
+// (which uses the same task system), so the workers spin through both.
+void b2World_BeginTaskSpan( b2WorldId worldId )
+{
+	b2World* world = b2GetWorldFromId( worldId );
+	if ( world->scheduler != NULL )
+	{
+		b2SchedulerBeginStep( world->scheduler );
+	}
+}
+
+void b2World_EndTaskSpan( b2WorldId worldId )
+{
+	b2World* world = b2GetWorldFromId( worldId );
+	if ( world->scheduler != NULL )
+	{
+		b2SchedulerEndStep( world->scheduler );
+	}
+}
+
 void b2World_Step( b2WorldId worldId, float timeStep, int subStepCount )
 {
 	B2_CHECK_INPUT( b2IsValidFloat( timeStep ) );
@@ -917,7 +937,7 @@ void b2World_Step( b2WorldId worldId, float timeStep, int subStepCount )
 	if ( world->scheduler != NULL )
 	{
 		b2ResetScheduler( world->scheduler );
-		b2SchedulerSetStepping( world->scheduler, 1 );
+		b2SchedulerBeginStep( world->scheduler );
 	}
 
 	uint64_t stepTicks = b2GetTicks();
@@ -1044,7 +1064,7 @@ void b2World_Step( b2WorldId worldId, float timeStep, int subStepCount )
 
 	if ( world->scheduler != NULL )
 	{
-		b2SchedulerSetStepping( world->scheduler, 0 );
+		b2SchedulerEndStep( world->scheduler );
 	}
 
 	b2TracyCFrame;
