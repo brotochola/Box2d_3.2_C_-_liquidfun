@@ -917,6 +917,7 @@ void b2World_Step( b2WorldId worldId, float timeStep, int subStepCount )
 	if ( world->scheduler != NULL )
 	{
 		b2ResetScheduler( world->scheduler );
+		b2SchedulerSetStepping( world->scheduler, 1 );
 	}
 
 	uint64_t stepTicks = b2GetTicks();
@@ -1040,6 +1041,11 @@ void b2World_Step( b2WorldId worldId, float timeStep, int subStepCount )
 	}
 
 	world->locked = false;
+
+	if ( world->scheduler != NULL )
+	{
+		b2SchedulerSetStepping( world->scheduler, 0 );
+	}
 
 	b2TracyCFrame;
 }

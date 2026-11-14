@@ -58,6 +58,8 @@ typedef struct b2Scheduler
 	b2AtomicInt spinTurns;
 	b2AtomicInt spinCount;
 #endif
+	// WeedJS E-298: 1 while a world step runs: a worker with nothing to do spins instead of sleeping.
+	b2AtomicInt stepping;
 } b2Scheduler;
 
 static bool b2SchedulerHasPending( b2Scheduler* scheduler )
@@ -216,6 +218,15 @@ static void b2SchedulerWorkerMain( void* context )
 			continue;
 		}
 
+		// WeedJS E-298: inside a world step, a worker that sleeps misses the next phase. Waking one from a futex
+		// (Atomics.wait in the browser) took up to ~1.5 ms on Windows, longer than most of a step's phases, so the
+		// calling thread ran them nearly alone (ballsHeavy: 42 % of its time in solver blocks against 16 % on each
+		// worker, which slept 63 % in _do_futex_wait). Between steps the workers sleep as before.
+		if ( b2AtomicLoadInt( &scheduler->stepping ) != 0 )
+		{
+			continue;
+		}
+
 		b2AtomicFetchAddInt( &scheduler->sleeperCount, 1 );
 
 		if ( b2SchedulerHasPending( scheduler ) || b2AtomicLoadInt( &scheduler->shutdown ) != 0 )
@@ -242,6 +253,7 @@ b2Scheduler* b2CreateScheduler( int workerCount )
 	b2AtomicStoreInt( &scheduler->sleeperCount, 0 );
 	b2AtomicStoreInt( &scheduler->shutdown, 0 );
 	b2AtomicStoreInt( &scheduler->nextSlot, 0 );
+	b2AtomicStoreInt( &scheduler->stepping, 0 );
 #if defined( __EMSCRIPTEN__ )
 	b2AtomicStoreInt( &scheduler->spinTurns, 0 );
 	b2AtomicStoreInt( &scheduler->spinCount, 0 );
@@ -285,6 +297,11 @@ void b2DestroyScheduler( b2Scheduler* scheduler )
 void b2ResetScheduler( b2Scheduler* scheduler )
 {
 	b2AtomicStoreInt( &scheduler->nextSlot, 0 );
+}
+
+void b2SchedulerSetStepping( b2Scheduler* scheduler, int stepping )
+{
+	b2AtomicStoreInt( &scheduler->stepping, stepping );
 }
 
 void* b2SchedulerEnqueueTask( b2TaskCallback* task, void* taskContext, void* userContext )
