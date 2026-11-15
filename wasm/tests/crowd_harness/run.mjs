@@ -6,7 +6,8 @@
 //
 // --build is a build folder of build_for_weed.bat (or the same CMake flags): it holds box2d/src/libbox2d.a,
 // and the include folder is the box2d/include of the checkout around it. Needs emcc on PATH (emsdk_env).
-// Prints every run's JSON line, then per build the median of the runs' mean step and the pose hash. A change
+// Prints every run's JSON line, then per build the median of the runs' mean step, of each b2Profile stage (ms;
+// the Weed build times only collide, solve and sleepIslands) and the pose hashes, then each build's deltas against the first. A change
 // that claims bit-identical results must give every build the same poseHash. Step times from a shared or busy
 // machine are a screen, not a verdict: WeedJS decides physics changes in its owner scene and Predator gate.
 import { execFileSync } from 'node:child_process';
@@ -65,11 +66,13 @@ const median = (xs) => {
   const s = [...xs].sort((a, b) => a - b);
   return s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
 };
+const stageNames = Object.keys(runs[0][0].stages);
 const summary = runs.map((list, b) => ({
   build: b,
   folder: builds[b],
   medianMeanMs: Number(median(list.map((r) => r.meanMs)).toFixed(4)),
   means: list.map((r) => r.meanMs),
+  stages: Object.fromEntries(stageNames.map((k) => [k, Number(median(list.map((r) => r.stages[k])).toFixed(4))])),
   poseHashes: [...new Set(list.map((r) => r.poseHash))],
 }));
 for (const s of summary) console.log(JSON.stringify({ summary: s }));
@@ -78,6 +81,12 @@ if (builds.length > 1) {
   for (const s of summary.slice(1)) {
     const pct = ((s.medianMeanMs - base) / base) * 100;
     const same = s.poseHashes.length === 1 && summary[0].poseHashes.length === 1 && s.poseHashes[0] === summary[0].poseHashes[0];
-    console.log(JSON.stringify({ versus: 0, build: s.build, deltaPct: Number(pct.toFixed(2)), poseHashSame: same }));
+    // Stages under 0.05 ms in the first build are left out: their percentages are noise.
+    const stagePct = Object.fromEntries(
+      stageNames
+        .filter((k) => summary[0].stages[k] >= 0.05)
+        .map((k) => [k, Number((((s.stages[k] - summary[0].stages[k]) / summary[0].stages[k]) * 100).toFixed(1))]),
+    );
+    console.log(JSON.stringify({ versus: 0, build: s.build, deltaPct: Number(pct.toFixed(2)), poseHashSame: same, stagePct }));
   }
 }

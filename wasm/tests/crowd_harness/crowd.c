@@ -7,9 +7,11 @@
 // xorshift, so a run is the same sequence of inputs every time. The world uses Box2D's internal scheduler
 // (no task callbacks), the one the WeedJS build runs, E-298's spin included.
 //
-// Output, one JSON line: the step times of the measured steps (mean, median, p95, after the warm-up), the
-// counters of the last step, and a hash of every walker's transform bits after the last step. Two builds of
-// the same inputs must print the same hash for a change that claims bit-identical results.
+// Output, one JSON line: the step times of the measured steps (mean, median, p95, after the warm-up), the mean
+// of each b2Profile stage over those steps (so an A/B shows which stage moved), the counters of the last step, and a hash of every walker's transform bits after the last step. Two builds of
+// the same inputs must print the same hash for a change that claims bit-identical results. The Weed build
+// defines B2_COARSE_PROFILE (WeedJS E-235): only step, collide, solve (the finalize included), sleepIslands and
+// sensors are timed there, and the finer stages read 0; a build without it fills them all.
 //
 // Args (all optional): bodies steps warmup workers seed
 #include "box2d/box2d.h"
@@ -113,6 +115,14 @@ int main( int argc, char** argv )
 		speed[i] = 30.0f + 30.0f * next_unit();
 	}
 
+	// b2Profile stages averaged over the measured steps (ms).
+#define B2_HARNESS_STAGES( X )                                                                                         \
+	X( pairs ) X( collide ) X( solve ) X( solverSetup ) X( prepareConstraints ) X( integrateVelocities ) X( warmStart )    \
+		X( solveImpulses ) X( integratePositions ) X( relaxImpulses ) X( restitution ) X( storeImpulses ) X( splitIslands ) \
+			X( transforms ) X( refit ) X( bullets ) X( sleepIslands )
+#define B2_HARNESS_DECLARE( name ) double stage_##name = 0.0;
+	B2_HARNESS_STAGES( B2_HARNESS_DECLARE )
+
 	const float dt = 1.0f / 60.0f;
 	int measured = stepCount - warmup;
 	double* times = (double*)malloc( sizeof( double ) * (size_t)measured );
@@ -128,7 +138,12 @@ int main( int argc, char** argv )
 		b2World_Step( world, dt, 4 );
 		double t1 = emscripten_get_now();
 		if ( step >= warmup )
+		{
 			times[step - warmup] = t1 - t0;
+			b2Profile profile = b2World_GetProfile( world );
+#define B2_HARNESS_ADD( name ) stage_##name += profile.name;
+			B2_HARNESS_STAGES( B2_HARNESS_ADD )
+		}
 	}
 
 	double sum = 0.0;
@@ -145,8 +160,18 @@ int main( int argc, char** argv )
 		hash = fnv1a( hash, &v, sizeof( v ) );
 	}
 
+	printf( "{\"stages\":{" );
+	{
+		const char* separator = "";
+#define B2_HARNESS_PRINT( name )                                                                                       \
+	printf( "%s\"" #name "\":%.4f", separator, stage_##name / measured );                                               \
+	separator = ",";
+		B2_HARNESS_STAGES( B2_HARNESS_PRINT )
+	}
+	printf( "}," );
+
 	b2Counters c = b2World_GetCounters( world );
-	printf( "{\"bodies\":%d,\"buildings\":%d,\"steps\":%d,\"warmup\":%d,\"workers\":%d,"
+	printf( "\"bodies\":%d,\"buildings\":%d,\"steps\":%d,\"warmup\":%d,\"workers\":%d,"
 			"\"meanMs\":%.4f,\"medianMs\":%.4f,\"p95Ms\":%.4f,"
 			"\"contacts\":%d,\"awakeContacts\":%d,\"recycledContacts\":%d,\"islands\":%d,"
 			"\"poseHash\":\"%016llx\"}\n",
