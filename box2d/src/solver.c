@@ -623,8 +623,41 @@ static void b2FinalizeBodiesTask( int startIndex, int endIndex, int workerIndex,
 
 	const float speculativeDistance = B2_SPECULATIVE_DISTANCE;
 
+#if defined( __wasm__ )
+	// WeedJS E-314: wasm has no prefetch instruction (b2Prefetch compiles to nothing), and each body below is a
+	// chain of dependent misses: the sim gives the body, the body its shape and island, the shape its fat AABB.
+	// Load ahead instead: the body of the sim 16 iterations on, then (its line in cache by now) the shape lines,
+	// fat AABB and island of the sim 8 iterations on. Volatile loads, so they stay; nothing reads the values.
+	b2Shape* aheadShapes = world->shapes.data;
+	b2AABB* aheadFatAABBs = world->fatAABBs.data;
+	b2Island* aheadIslands = world->islands.data;
+#endif
+
 	for ( int simIndex = startIndex; simIndex < endIndex; ++simIndex )
 	{
+#if defined( __wasm__ )
+		if ( simIndex + 16 < endIndex )
+		{
+			(void)*(volatile const int*)&bodies[sims[simIndex + 16].bodyId].headShapeId;
+		}
+		if ( simIndex + 8 < endIndex )
+		{
+			const b2Body* aheadBody = bodies + sims[simIndex + 8].bodyId;
+			int aheadShapeId = aheadBody->headShapeId;
+			if ( aheadShapeId != B2_NULL_INDEX )
+			{
+				const b2Shape* aheadShape = aheadShapes + aheadShapeId;
+				(void)*(volatile const int*)&aheadShape->type;
+				(void)*(volatile const float*)&aheadShape->circle.radius;
+				(void)*(volatile const float*)&aheadFatAABBs[aheadShapeId].lowerBound.x;
+			}
+			if ( aheadBody->islandId != B2_NULL_INDEX )
+			{
+				(void)*(volatile const int*)&aheadIslands[aheadBody->islandId].localIndex;
+			}
+		}
+#endif
+
 		b2BodyState* state = states + simIndex;
 		b2BodySim* sim = sims + simIndex;
 
