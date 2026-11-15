@@ -708,31 +708,45 @@ typedef struct b2ContactConstraintWide
 	int indexA[B2_SIMD_WIDTH];
 	int indexB[B2_SIMD_WIDTH];
 
+	// WeedJS E-316: nonzero when some lane's manifold has a second point. Circle contacts (circle-circle,
+	// circle-polygon, circle-capsule) have one point, so in a crowd of circles most constraints have no second
+	// point in any lane; every stage then skips it, and its fields, at the tail of this struct, are not touched.
+	int twoPoint;
+
 	b2FloatW invMassA, invMassB;
 	b2FloatW invIA, invIB;
 	b2Vec2W normal;
 	b2Vec2W anchorA1, anchorB1;
-	b2Vec2W anchorA2, anchorB2;
-	b2FloatW normalMass1, normalMass2;
+	b2FloatW normalMass1;
 	b2FloatW baseSeparation1;
-	b2FloatW baseSeparation2;
 
 	// Write in push and solve
-	b2FloatW normalImpulse1, normalImpulse2;
-	b2FloatW totalNormalImpulse1, totalNormalImpulse2;
+	b2FloatW normalImpulse1;
+	b2FloatW totalNormalImpulse1;
 
 	// Write in solve
-	b2FloatW tangentImpulse1, tangentImpulse2;
+	b2FloatW tangentImpulse1;
 	b2FloatW rollingImpulse;
 
 	// Read in solve
 	b2FloatW friction;
 	b2FloatW tangentSpeed;
 	b2FloatW rollingResistance;
-	b2FloatW tangentMass1, tangentMass2;
+	b2FloatW tangentMass1;
 	b2FloatW restitution;
-	b2FloatW relativeVelocity1, relativeVelocity2;
-	b2FloatW restitutionImpulse1, restitutionImpulse2;
+	b2FloatW relativeVelocity1;
+	b2FloatW restitutionImpulse1;
+
+	// The second point: read and written only when twoPoint is set
+	b2Vec2W anchorA2, anchorB2;
+	b2FloatW normalMass2;
+	b2FloatW baseSeparation2;
+	b2FloatW normalImpulse2;
+	b2FloatW totalNormalImpulse2;
+	b2FloatW tangentImpulse2;
+	b2FloatW tangentMass2;
+	b2FloatW relativeVelocity2;
+	b2FloatW restitutionImpulse2;
 
 } b2ContactConstraintWide;
 
@@ -1330,6 +1344,7 @@ void B2_WIDE( b2PrepareContacts_Wide )( b2SolverBlock block, b2StepContext* cont
 								  (float)contactLanes[6]->manifold.pointCount, (float)contactLanes[7]->manifold.pointCount );
 #endif
 			b2FloatW twoPointMask = b2GreaterThanW( pointCounts, oneW );
+			cw->twoPoint = b2AnyTrueW( twoPointMask ) ? 1 : 0;
 
 			{
 				// Optimized transpose gather. Similar to b2GatherBodies.
@@ -1428,6 +1443,7 @@ void B2_WIDE( b2PrepareContacts_Wide )( b2SolverBlock block, b2StepContext* cont
 				}
 			}
 
+			if ( cw->twoPoint )
 			{
 #if B2_SIMD_WIDTH == 4
 				b2FloatW m1a = b2LoadU( (float*)( contactLanes[0]->manifold.points + 1 ) + 0 );
@@ -1561,6 +1577,7 @@ void B2_WIDE( b2PrepareContacts_Wide )( b2SolverBlock block, b2StepContext* cont
 					}
 				}
 
+				if ( cw->twoPoint )
 				{
 					b2Vec2W rA = cw->anchorA2;
 					b2Vec2W rB = cw->anchorB2;
@@ -1631,6 +1648,7 @@ void B2_WIDE( b2WarmStartContacts_Wide )( b2SolverBlock block, b2StepContext* co
 			c->totalNormalImpulse1 = b2AddW( c->totalNormalImpulse1, c->normalImpulse1 );
 		}
 
+		if ( c->twoPoint )
 		{
 			// fixed anchors
 			b2Vec2W rA = c->anchorA2;
@@ -1751,6 +1769,7 @@ void B2_WIDE( b2PushContacts_Wide )( b2SolverBlock block, b2StepContext* context
 		}
 
 		// second point non-penetration constraint
+		if ( c->twoPoint )
 		{
 			// moving anchors for current separation
 			b2Vec2W rsA = b2RotateVectorW( bA.dq, c->anchorA2 );
@@ -1829,7 +1848,7 @@ void B2_WIDE( b2SolveContacts_Wide )( b2SolverBlock block, b2StepContext* contex
 
 		b2Vec2W dp = { b2SubW( bB.dp.X, bA.dp.X ), b2SubW( bB.dp.Y, bA.dp.Y ) };
 
-		b2FloatW velocityBias1, velocityBias2;
+		b2FloatW velocityBias1, velocityBias2 = b2ZeroW();
 		{
 			// Moving anchors for current separation
 			b2Vec2W rsA = b2RotateVectorW( bA.dq, c->anchorA1 );
@@ -1844,6 +1863,7 @@ void B2_WIDE( b2SolveContacts_Wide )( b2SolverBlock block, b2StepContext* contex
 			velocityBias1 = b2MaxW( b2ZeroW(), b2MulW( s, inv_h ) );
 		}
 
+		if ( c->twoPoint )
 		{
 			b2Vec2W rsA = b2RotateVectorW( bA.dq, c->anchorA2 );
 			b2Vec2W rsB = b2RotateVectorW( bB.dq, c->anchorB2 );
@@ -1890,6 +1910,7 @@ void B2_WIDE( b2SolveContacts_Wide )( b2SolverBlock block, b2StepContext* contex
 		}
 
 		// second point non-penetration constraint
+		if ( c->twoPoint )
 		{
 			// fixed anchors for Jacobians
 			b2Vec2W rA = c->anchorA2;
@@ -1980,6 +2001,7 @@ void B2_WIDE( b2SolveContacts_Wide )( b2SolverBlock block, b2StepContext* contex
 		}
 
 		// second point friction constraint
+		if ( c->twoPoint )
 		{
 			// fixed anchors for Jacobians
 			b2Vec2W rA = c->anchorA2;
@@ -2048,7 +2070,6 @@ void B2_WIDE( b2ApplyRestitution_Wide )( b2SolverBlock block, b2StepContext* con
 
 		b2FloatW restitutionMask = b2GreaterThanW( c->restitution, zeroW );
 		b2FloatW normalMass1 = propagate ? c->normalMass1 : b2BlendW( zeroW, c->normalMass1, restitutionMask );
-		b2FloatW normalMass2 = propagate ? c->normalMass2 : b2BlendW( zeroW, c->normalMass2, restitutionMask );
 		b2Vec2W dp = { b2SubW( bB.dp.X, bA.dp.X ), b2SubW( bB.dp.Y, bA.dp.Y ) };
 
 		{
@@ -2098,7 +2119,9 @@ void B2_WIDE( b2ApplyRestitution_Wide )( b2SolverBlock block, b2StepContext* con
 			bB.w = b2MulAddW( bB.w, c->invIB, b2SubW( b2MulW( rB.X, Py ), b2MulW( rB.Y, Px ) ) );
 		}
 
+		if ( c->twoPoint )
 		{
+			b2FloatW normalMass2 = propagate ? c->normalMass2 : b2BlendW( zeroW, c->normalMass2, restitutionMask );
 			b2Vec2W rA = c->anchorA2;
 			b2Vec2W rB = c->anchorB2;
 
@@ -2219,9 +2242,12 @@ void B2_WIDE( b2StoreImpulses_Wide )( b2SolverBlock block, b2StepContext* contex
 				m->points[0].tangentImpulse = tangentImpulse1[laneIndex];
 				m->points[0].totalNormalImpulse = totalNormalImpulse1[laneIndex];
 
-				m->points[1].normalImpulse = normalImpulse2[laneIndex];
-				m->points[1].tangentImpulse = tangentImpulse2[laneIndex];
-				m->points[1].totalNormalImpulse = totalNormalImpulse2[laneIndex];
+				if ( c->twoPoint )
+				{
+					m->points[1].normalImpulse = normalImpulse2[laneIndex];
+					m->points[1].tangentImpulse = tangentImpulse2[laneIndex];
+					m->points[1].totalNormalImpulse = totalNormalImpulse2[laneIndex];
+				}
 
 				// Check for hit events to speed up serial processing later in the step
 				if ( ( contactSim->simFlags & b2_simEnableHitEvent ) != 0 )
