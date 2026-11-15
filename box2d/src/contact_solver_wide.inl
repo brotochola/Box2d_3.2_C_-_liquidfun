@@ -400,14 +400,25 @@ static inline b2FloatW b2MulSubW( b2FloatW a, b2FloatW b, b2FloatW c )
 	return _mm_sub_ps( a, _mm_mul_ps( b, c ) );
 }
 
+// _mm_min_ps( a, b ) is a < b ? a : b and _mm_max_ps( a, b ) is a > b ? a : b; emscripten emulates each with a
+// compare and a bitselect. wasm's pmin( b, a ) and pmax( b, a ) are the same selects (b for equal values, -0 included,
+// and for NaN) in one instruction each (WeedJS E-357). The no-SIMD build has no __wasm_simd128__ and keeps the intrinsics.
 static inline b2FloatW b2MinW( b2FloatW a, b2FloatW b )
 {
+#if defined( __wasm_simd128__ )
+	return (b2FloatW)wasm_f32x4_pmin( (v128_t)b, (v128_t)a );
+#else
 	return _mm_min_ps( a, b );
+#endif
 }
 
 static inline b2FloatW b2MaxW( b2FloatW a, b2FloatW b )
 {
+#if defined( __wasm_simd128__ )
+	return (b2FloatW)wasm_f32x4_pmax( (v128_t)b, (v128_t)a );
+#else
 	return _mm_max_ps( a, b );
+#endif
 }
 
 // a = clamp(a, -b, b)
@@ -419,7 +430,7 @@ static inline b2FloatW b2SymClampW( b2FloatW a, b2FloatW b )
 	// XOR the input with the mask to negate each element
 	__m128 nb = _mm_xor_ps( b, mask );
 
-	return _mm_max_ps( nb, _mm_min_ps( a, b ) );
+	return b2MaxW( nb, b2MinW( a, b ) );
 }
 
 static inline b2FloatW b2AndW( b2FloatW a, b2FloatW b )
